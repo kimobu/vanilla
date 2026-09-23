@@ -1,5 +1,5 @@
 <div align="center">
-    <img src="Ice/Assets.xcassets/AppIcon.appiconset/icon_256x256.png" alt="Vanilla icon" width=200 height=200>
+    <img src="Resources/Icon.png" alt="Vanilla icon" width=200 height=200>
     <h1>Vanilla</h1>
 </div>
 
