@@ -30,7 +30,7 @@
 - `Resources/AppIconSource.png` and `Resources/GenerateIcons.swift`: Vanilla's app icon artwork and asset generation.
 - `.swiftlint.yml`, `.github/workflows/lint.yml`, and `.github/workflows/build.yml`: lint, build, and test configuration.
 
-The app source directory is still named `Ice/`. The following paths are relative to that directory; it is a legacy folder name, not the app's name:
+The app source directory is `Vanilla/`. The following paths are relative to that directory:
 
 - `Main/VanillaApp.swift`, `Main/AppDelegate.swift`, and `Main/AppState.swift`: app entry point, delegate, and ownership of the main managers.
 - `MenuBar/`: item management, sections, appearance, spacing, search, and control items.

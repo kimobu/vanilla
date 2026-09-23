@@ -41,7 +41,7 @@ Inspect the item movement, capture, display-coordinate, and permission paths on 
 
 **Completion:** signed development builds exercise hiding, arranging, the bar, search, hotkeys, permissions, full-screen Spaces, display changes, and sleep/wake on macOS 26 and 27. Record the OS/build and result of each relevant check. Add a test target to the shared scheme for layout and persistence logic, plus Debug/Release compile checks in CI. Record idle CPU and memory, capture counts, and movement counts for a repeatable scenario before optimizing.
 
-**Starting code:** [AppState](Ice/Main/AppState.swift), [item manager](Ice/MenuBar/MenuBarItems/MenuBarItemManager.swift), [capture](Ice/Utilities/ScreenCapture.swift), [project](Vanilla.xcodeproj/project.pbxproj).
+**Starting code:** [AppState](Vanilla/Main/AppState.swift), [item manager](Vanilla/MenuBar/MenuBarItems/MenuBarItemManager.swift), [capture](Vanilla/Utilities/ScreenCapture.swift), [project](Vanilla.xcodeproj/project.pbxproj).
 
 ### V02 — Remember item placement and choose where new items go
 
@@ -51,7 +51,7 @@ Evaluate the existing namespace/title identity against apps with multiple items,
 
 **Completion:** arrange a mix of single-item and multi-item apps; relaunch the apps and Vanilla; restore the same section and relative order. A newly installed app follows the chosen default. Repeated layout application leaves a settled bar untouched. Tests cover identity matching, returning items, user moves, and repeated migration.
 
-**Starting code:** [item identity](Ice/MenuBar/MenuBarItems/MenuBarItemInfo.swift), [item cache and movement](Ice/MenuBar/MenuBarItems/MenuBarItemManager.swift), [layout dragging](Ice/UI/LayoutBar/LayoutBarContainer.swift), [defaults](Ice/Utilities/Defaults.swift).
+**Starting code:** [item identity](Vanilla/MenuBar/MenuBarItems/MenuBarItemInfo.swift), [item cache and movement](Vanilla/MenuBar/MenuBarItems/MenuBarItemManager.swift), [layout dragging](Vanilla/UI/LayoutBar/LayoutBarContainer.swift), [defaults](Vanilla/Utilities/Defaults.swift).
 
 ## P1: finish everyday organization
 
@@ -61,7 +61,7 @@ Add a shortcut to enable/disable auto-rehide using the existing setting. Separat
 
 **Completion:** the rehide shortcut updates the visible setting and survives relaunch. An item shortcut still targets the same item after its app restarts. Temporary reveal returns the item to its prior place after interaction. Tests cover action encoding and shortcut conflict handling.
 
-**Starting code:** [HotkeyAction](Ice/Hotkeys/HotkeyAction.swift), [hotkey settings](Ice/Settings/SettingsPanes/HotkeysSettingsPane.swift), [item operations](Ice/MenuBar/MenuBarItems/MenuBarItemManager.swift).
+**Starting code:** [HotkeyAction](Vanilla/Hotkeys/HotkeyAction.swift), [hotkey settings](Vanilla/Settings/SettingsPanes/HotkeysSettingsPane.swift), [item operations](Vanilla/MenuBar/MenuBarItems/MenuBarItemManager.swift).
 
 ### V04 — Make capture permission optional in more places
 
@@ -69,7 +69,7 @@ Use app icons and labels in the layout editor and Vanilla Bar when captured imag
 
 **Completion:** with Accessibility granted and screen recording off, users can identify, arrange, search, and activate supported items. Granting or revoking capture permission updates the views. Verify all paths on macOS 26 and 27.
 
-**Starting code:** [search rows](Ice/MenuBar/Search/MenuBarSearchPanel.swift), [layout settings](Ice/Settings/SettingsPanes/MenuBarLayoutSettingsPane.swift), [bar](Ice/UI/IceBar/IceBar.swift), [permissions](Ice/Permissions/PermissionsManager.swift).
+**Starting code:** [search rows](Vanilla/MenuBar/Search/MenuBarSearchPanel.swift), [layout settings](Vanilla/Settings/SettingsPanes/MenuBarLayoutSettingsPane.swift), [bar](Vanilla/UI/IceBar/IceBar.swift), [permissions](Vanilla/Permissions/PermissionsManager.swift).
 
 ### V03 — Handle auto-hidden menu bars and crowded displays
 
@@ -77,7 +77,7 @@ First investigate how to operate when macOS automatically hides its menu bar. Th
 
 **Completion:** layout and bar access work with the supported auto-hide settings without asking users to permanently change their system preference. On a notched display and an external display, every supported item remains reachable as available width changes. Restored width restores the saved placement. Specify any OS-specific behavior from observed results before implementing it.
 
-**Starting code:** [MenuBarManager](Ice/MenuBar/MenuBarManager.swift), [bar](Ice/UI/IceBar/IceBar.swift), [layout settings](Ice/Settings/SettingsPanes/MenuBarLayoutSettingsPane.swift), [item manager](Ice/MenuBar/MenuBarItems/MenuBarItemManager.swift).
+**Starting code:** [MenuBarManager](Vanilla/MenuBar/MenuBarManager.swift), [bar](Vanilla/UI/IceBar/IceBar.swift), [layout settings](Vanilla/Settings/SettingsPanes/MenuBarLayoutSettingsPane.swift), [item manager](Vanilla/MenuBar/MenuBarItems/MenuBarItemManager.swift).
 
 ### V06 — Add profiles, then match them to displays
 
@@ -85,7 +85,7 @@ Create, duplicate, rename, delete, and manually apply named arrangements such as
 
 **Completion:** two profiles restore distinct arrangements across relaunch; absent apps retain their intended places; export/import preserves a profile. Connecting and disconnecting a configured display selects the intended profile. Applying the already-active profile does not rearrange settled items.
 
-**Starting code:** V02's new model, [settings navigation](Ice/Main/Navigation/NavigationIdentifiers/SettingsNavigationIdentifier.swift), [appearance configuration](Ice/MenuBar/Appearance/Configurations/MenuBarAppearanceConfigurationV2.swift).
+**Starting code:** V02's new model, [settings navigation](Vanilla/Main/Navigation/NavigationIdentifiers/SettingsNavigationIdentifier.swift), [appearance configuration](Vanilla/MenuBar/Appearance/Configurations/MenuBarAppearanceConfigurationV2.swift).
 
 ### V12 — Complete spacing controls
 
@@ -95,7 +95,7 @@ Review the existing preference-writing and app-relaunch implementation. Clearly 
 
 **Runtime update (September 22):** Apply/Reset, measured spacing, publisher return, and persistence across Vanilla relaunch passed on macOS 26.5 and 27.0. Global values and all app preferences were restored. macOS 27 initially showed empty Layout views before recovery. Timed single- and three-publisher fixture checks subsequently passed in about three seconds; a persistent recovery defect was not reproduced. Vanilla's own spacing updated after relaunch.
 
-**Starting code:** [spacing manager](Ice/MenuBar/Spacing/MenuBarItemSpacingManager.swift), [general settings](Ice/Settings/SettingsPanes/GeneralSettingsPane.swift).
+**Starting code:** [spacing manager](Vanilla/MenuBar/Spacing/MenuBarItemSpacingManager.swift), [general settings](Vanilla/Settings/SettingsPanes/GeneralSettingsPane.swift).
 
 ### V13 — Ship Vanilla updates
 
@@ -103,7 +103,7 @@ Set up Vanilla's own versioning, signed/notarized distribution, release assets, 
 
 **Completion:** install an older signed Vanilla build, update through Vanilla's feed, relaunch, and retain settings. Validate release links and automatic/manual update controls. Never point the fork back at Ice's update feed.
 
-**Starting code:** [updater](Ice/Updates/UpdatesManager.swift), [Info.plist](Ice/Info.plist), [About pane](Ice/Settings/SettingsPanes/AboutSettingsPane.swift).
+**Starting code:** [updater](Vanilla/Updates/UpdatesManager.swift), [Info.plist](Vanilla/Info.plist), [About pane](Vanilla/Settings/SettingsPanes/AboutSettingsPane.swift).
 
 ### V15 — Align the documentation and remaining branding
 
@@ -117,7 +117,7 @@ Bartender 7's documented behavior makes this worth investigating, but its implem
 
 **Completion of research:** a small prototype demonstrates supported operations with the pointer stationary, or a written finding records which operations still need the current method. Only then size the implementation. Do not promise parity based on availability checks alone.
 
-**Starting code:** [move/click operations](Ice/MenuBar/MenuBarItems/MenuBarItemManager.swift), [bridging](Ice/Bridging/Bridging.swift), [mouse cursor](Ice/Utilities/MouseCursor.swift). Comparison source: [Bartender 7](https://www.macbartender.com/Bartender7/).
+**Starting code:** [move/click operations](Vanilla/MenuBar/MenuBarItems/MenuBarItemManager.swift), [bridging](Vanilla/Bridging/Bridging.swift), [mouse cursor](Vanilla/Utilities/MouseCursor.swift). Comparison source: [Bartender 7](https://www.macbartender.com/Bartender7/).
 
 ## P2: add organization and automation
 
@@ -129,7 +129,7 @@ Bartender 7's documented behavior makes this worth investigating, but its implem
 | V10 — Appearance | Separate Vanilla Bar styling from menu bar styling; optionally attach styles to displays/profiles. Retain existing light/dark colors. Work with macOS's background setting. Treat whole-display corner rounding as a separate optional feature. | Bar styles can differ from the menu bar; display changes select the right style; light/dark changes preserve user choices. Investigate per-Space styling separately before committing it. |
 | V11 — External actions | Expose list-items, reveal/activate-item, toggle-bar, and apply-profile through App Intents/Shortcuts. Add AppleScript only for workflows that need it. Reuse the same operations as the UI. | A Shortcut selects an item, activates it, and applies a named profile. Calls made while Vanilla is already moving items produce a defined final arrangement. |
 
-Start V07 in a dedicated rule manager, using event-driven condition providers and the V02/V06 operations. V08/V09 should use new models built on [ControlItem](Ice/MenuBar/ControlItem/ControlItem.swift), not extend the fixed section enum with every user-created item. V10 extends the [appearance manager](Ice/MenuBar/Appearance/MenuBarAppearanceManager.swift). V11 wraps existing operations rather than putting system logic in the intent declarations.
+Start V07 in a dedicated rule manager, using event-driven condition providers and the V02/V06 operations. V08/V09 should use new models built on [ControlItem](Vanilla/MenuBar/ControlItem/ControlItem.swift), not extend the fixed section enum with every user-created item. V10 extends the [appearance manager](Vanilla/MenuBar/Appearance/MenuBarAppearanceManager.swift). V11 wraps existing operations rather than putting system logic in the intent declarations.
 
 ## P3: consider after the core release
 

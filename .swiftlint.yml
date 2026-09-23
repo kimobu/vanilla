@@ -1,5 +1,5 @@
 included:
-  - Ice
+  - Vanilla
   - Tests
 
 disabled_rules:

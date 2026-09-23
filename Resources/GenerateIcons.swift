@@ -7,7 +7,7 @@
 import AppKit
 
 let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-let assets = root.appendingPathComponent("Ice/Assets.xcassets")
+let assets = root.appendingPathComponent("Vanilla/Assets.xcassets")
 
 func mark() -> NSBezierPath {
     let path = NSBezierPath()
