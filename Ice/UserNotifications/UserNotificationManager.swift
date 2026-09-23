@@ -58,29 +58,24 @@ final class UserNotificationManager: NSObject {
 }
 
 // MARK: UserNotificationManager: UNUserNotificationCenterDelegate
-extension UserNotificationManager: @preconcurrency UNUserNotificationCenterDelegate {
-    func userNotificationCenter(
+extension UserNotificationManager: UNUserNotificationCenterDelegate {
+    nonisolated func userNotificationCenter(
         _ center: UNUserNotificationCenter,
-        didReceive response: UNNotificationResponse,
-        withCompletionHandler completionHandler: @escaping () -> Void
-    ) {
-        defer {
-            completionHandler()
-        }
+        didReceive response: UNNotificationResponse
+    ) async {
+        // UserNotifications can call its delegate away from the main actor.
+        // Pass only immutable identifiers to the UI handler.
+        let identifier = response.notification.request.identifier
+        let actionIdentifier = response.actionIdentifier
+        await handleResponse(identifier: identifier, actionIdentifier: actionIdentifier)
+    }
 
-        guard let appState else {
-            return
-        }
-
-        switch UserNotificationIdentifier(rawValue: response.notification.request.identifier) {
-        case .updateCheck:
-            guard response.actionIdentifier == UNNotificationDefaultActionIdentifier else {
-                break
-            }
-            appState.updatesManager.checkForUpdates()
-        case nil:
-            break
-        }
+    private func handleResponse(identifier: String, actionIdentifier: String) {
+        guard
+            UserNotificationIdentifier(rawValue: identifier) == .updateCheck,
+            actionIdentifier == UNNotificationDefaultActionIdentifier
+        else { return }
+        appState?.updatesManager.checkForUpdates()
     }
 }
 

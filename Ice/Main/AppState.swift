@@ -46,7 +46,7 @@ final class AppState: ObservableObject {
     let navigationState = AppNavigationState()
 
     /// The app's hotkey registry.
-    nonisolated let hotkeyRegistry = HotkeyRegistry()
+    let hotkeyRegistry = HotkeyRegistry()
 
     /// The app's delegate.
     private(set) weak var appDelegate: AppDelegate?
@@ -145,8 +145,8 @@ final class AppState: ObservableObject {
             else {
                 return
             }
-            Task.detached {
-                if ScreenCapture.cachedCheckPermissions(reset: true) {
+            Task {
+                if self.imageCache.refreshPermissionState() {
                     await self.imageCache.updateCacheWithoutChecks(sections: MenuBarSection.Name.allCases)
                 }
             }
@@ -249,13 +249,9 @@ final class AppState: ObservableObject {
     }
 
     /// Activates the app and sets its activation policy to the given value.
-    func activate(withPolicy policy: NSApplication.ActivationPolicy) {
-        // Store whether the app has previously activated inside an internal
-        // context to keep it isolated.
-        enum Context {
-            static let hasActivated = ObjectStorage<Bool>()
-        }
+    private var hasActivated = false
 
+    func activate(withPolicy policy: NSApplication.ActivationPolicy) {
         func activate() {
             if let frontApp = NSWorkspace.shared.frontmostApplication {
                 NSRunningApplication.current.activate(from: frontApp)
@@ -265,10 +261,10 @@ final class AppState: ObservableObject {
             NSApp.setActivationPolicy(policy)
         }
 
-        if Context.hasActivated.value(for: self) == true {
+        if hasActivated {
             activate()
         } else {
-            Context.hasActivated.set(true, for: self)
+            hasActivated = true
             Logger.appState.debug("First time activating app, so going through Dock")
             // Hack to make sure the app properly activates for the first time.
             NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.activate()

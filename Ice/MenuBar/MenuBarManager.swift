@@ -26,7 +26,11 @@ final class MenuBarManager: ObservableObject {
     private weak var appState: AppState?
 
     /// Storage for internal observers.
+    private let accessibilitySystem = SystemWideElement(AXUIElementCreateSystemWide())
+
     private var cancellables = Set<AnyCancellable>()
+    private let focusedAppRehide = DelayedAction<UUID>()
+    private var averageColorTask: Task<Void, Never>?
 
     /// A Boolean value that indicates whether the application menus are hidden.
     private var isHidingApplicationMenus = false
@@ -60,6 +64,22 @@ final class MenuBarManager: ObservableObject {
         iceBarPanel.performSetup()
     }
 
+    isolated deinit {
+        averageColorTask?.cancel()
+    }
+
+    func performTeardown() {
+        cancellables.removeAll()
+        cancelPendingRehide()
+        averageColorTask?.cancel()
+        averageColorTask = nil
+        for section in sections { section.stopRehideChecks() }
+    }
+
+    func cancelPendingRehide() {
+        focusedAppRehide.cancel()
+    }
+
     /// Performs the initial setup of the menu bar manager's sections.
     private func initializeSections() {
         // Make sure initialization can only happen once.
@@ -83,6 +103,16 @@ final class MenuBarManager: ObservableObject {
     /// Configures the internal observers for the manager.
     private func configureCancellables() {
         var c = Set<AnyCancellable>()
+
+        if let settings = appState?.settingsManager.generalSettingsManager {
+            Publishers.CombineLatest3(settings.$autoRehide, settings.$rehideStrategy, settings.$rehideInterval)
+                .receive(on: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    self?.cancelPendingRehide()
+                    for section in self?.sections ?? [] { section.startRehideChecks() }
+                }
+                .store(in: &c)
+        }
 
         NSApp.publisher(for: \.currentSystemPresentationOptions)
             .receive(on: DispatchQueue.main)
@@ -119,18 +149,7 @@ final class MenuBarManager: ObservableObject {
         NSWorkspace.shared.publisher(for: \.frontmostApplication)
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                if
-                    let self,
-                    let appState,
-                    case .focusedApp = appState.settingsManager.generalSettingsManager.rehideStrategy,
-                    let hiddenSection = section(withName: .hidden),
-                    !appState.eventManager.isMouseInsideMenuBar
-                {
-                    Task {
-                        try await Task.sleep(for: .seconds(0.1))
-                        hiddenSection.hide()
-                    }
-                }
+                self?.handleFocusedAppChange()
             }
             .store(in: &c)
 
@@ -186,7 +205,7 @@ final class MenuBarManager: ObservableObject {
                     }
 
                     // Get all items.
-                    var items = MenuBarItem.getMenuBarItems(on: displayID, onScreenOnly: false, activeSpaceOnly: true)
+                    var items = appState.itemManager.menuBarItems(on: displayID, onScreenOnly: false, activeSpaceOnly: true)
 
                     // Filter the items down according to the currently enabled/shown sections.
                     if
@@ -223,9 +242,32 @@ final class MenuBarManager: ObservableObject {
         cancellables = c
     }
 
-    /// Updates the ``averageColorInfo`` property with the current average color
-    /// of the menu bar.
+    private var canRehideForFocusedApp: Bool {
+        guard let appState else { return false }
+        let settings = appState.settingsManager.generalSettingsManager
+        return settings.autoRehide && settings.rehideStrategy == .focusedApp &&
+            !appState.eventManager.isMouseInsideMenuBar && section(withName: .hidden)?.isHidden == false
+    }
+
+    private func handleFocusedAppChange() {
+        cancelPendingRehide()
+        guard canRehideForFocusedApp else { return }
+        focusedAppRehide.schedule(key: UUID(), after: .milliseconds(100)) { [weak self] in
+            guard let self, canRehideForFocusedApp else { return }
+            Logger.menuBarManager.debug("Rehiding after focused application changed")
+            section(withName: .hidden)?.hide()
+        }
+    }
+
+    /// Updates the average menu bar color while Settings needs it.
     func updateAverageColorInfo() {
+        averageColorTask?.cancel()
+        averageColorTask = Task { [weak self] in
+            await self?.captureAverageColorInfo()
+        }
+    }
+
+    private func captureAverageColorInfo() async {
         guard
             canUpdateAverageColorInfo,
             let screen = appState?.settingsWindow?.screen
@@ -239,21 +281,29 @@ final class MenuBarManager: ObservableObject {
         let windows = WindowInfo.getOnScreenWindows(excludeDesktopWindows: false)
         let displayID = screen.displayID
 
-        if let window = WindowInfo.getMenuBarWindow(from: windows, for: displayID) {
+        if #available(macOS 27, *) {
+            guard (screen.getMenuBarHeight() ?? 0) > 0 else { return }
+            let displayBounds = CGDisplayBounds(displayID)
+            let bounds = CGRect(x: displayBounds.maxX - displayBounds.width / 4, y: displayBounds.minY, width: displayBounds.width / 4, height: 1)
+            image = await ScreenCapture.captureRegion(bounds)
+            source = .menuBarScreen
+        } else if let window = WindowInfo.getMenuBarWindow(from: windows, for: displayID) {
             var bounds = window.frame
             bounds.size.height = 1
             bounds.origin.x = bounds.maxX - (bounds.width / 4)
             bounds.size.width /= 4
 
-            image = ScreenCapture.captureWindow(window.windowID, screenBounds: bounds, option: .nominalResolution)
-            source = .menuBarWindow
+            // Sample the composited bar, including the system background.
+            // Its individual WindowServer window can contain only transparency.
+            image = await ScreenCapture.captureRegion(bounds)
+            source = .menuBarScreen
         } else if let window = WindowInfo.getWallpaperWindow(from: windows, for: displayID) {
             var bounds = window.frame
             bounds.size.height = 1
             bounds.origin.x = bounds.midX
             bounds.size.width /= 2
 
-            image = ScreenCapture.captureWindow(window.windowID, screenBounds: bounds, option: .nominalResolution)
+            image = await ScreenCapture.captureWindow(window.windowID, screenBounds: bounds, scale: 1)
             source = .desktopWallpaper
         } else {
             return
@@ -266,6 +316,7 @@ final class MenuBarManager: ObservableObject {
             return
         }
 
+        guard !Task.isCancelled else { return }
         let info = MenuBarAverageColorInfo(color: color, source: source)
 
         if averageColorInfo != info {
@@ -281,7 +332,7 @@ final class MenuBarManager: ObservableObject {
         }
         let position = menuBarWindow.frame.origin
         do {
-            let uiElement = try systemWideElement.elementAtPosition(Float(position.x), Float(position.y))
+            let uiElement = try accessibilitySystem.elementAtPosition(Float(position.x), Float(position.y))
             return try uiElement?.role() == .menuBar
         } catch {
             return false
@@ -293,7 +344,7 @@ final class MenuBarManager: ObservableObject {
         let displayBounds = CGDisplayBounds(displayID)
 
         guard
-            let menuBar = try? systemWideElement.elementAtPosition(Float(displayBounds.origin.x), Float(displayBounds.origin.y)),
+            let menuBar = try? accessibilitySystem.elementAtPosition(Float(displayBounds.origin.x), Float(displayBounds.origin.y)),
             let role = try? menuBar.role(),
             role == .menuBar,
             let items: [UIElement] = try? menuBar.arrayAttribute(.children)?.filter({ (try? $0.attribute(.enabled)) == true })
@@ -327,7 +378,7 @@ final class MenuBarManager: ObservableObject {
 
     /// Shows the right-click menu.
     func showRightClickMenu(at point: CGPoint) {
-        let menu = NSMenu(title: "Ice")
+        let menu = NSMenu(title: "Vanilla")
 
         let editItem = NSMenuItem(
             title: "Edit Menu Bar Appearance…",
@@ -340,7 +391,7 @@ final class MenuBarManager: ObservableObject {
         menu.addItem(.separator())
 
         let settingsItem = NSMenuItem(
-            title: "Ice Settings…",
+            title: "Vanilla Settings…",
             action: #selector(AppDelegate.openSettingsWindow),
             keyEquivalent: ","
         )
@@ -406,6 +457,7 @@ extension MenuBarManager: BindingExposable { }
 struct MenuBarAverageColorInfo: Hashable {
     enum Source: Hashable {
         case menuBarWindow
+        case menuBarScreen
         case desktopWallpaper
     }
 

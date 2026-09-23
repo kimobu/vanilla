@@ -6,7 +6,7 @@
 import SwiftUI
 
 /// A custom gradient for use with a ``GradientPicker``.
-struct CustomGradient: View {
+nonisolated struct CustomGradient: View, Sendable {
     /// The color stops in the gradient.
     var stops: [ColorStop]
 

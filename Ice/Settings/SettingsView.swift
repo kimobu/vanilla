@@ -37,7 +37,9 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        NavigationSplitView {
+        // Settings always exposes its destinations. Keep column visibility in
+        // SwiftUI instead of replacing NSSplitViewItem's getter process-wide.
+        NavigationSplitView(columnVisibility: .constant(.all)) {
             sidebar
         } detail: {
             detailView
@@ -53,7 +55,7 @@ struct SettingsView: View {
                     sidebarItem(for: identifier)
                 }
             } header: {
-                Text("Ice")
+                Text("Vanilla")
                     .font(.system(size: 36, weight: .medium))
                     .foregroundStyle(.primary)
                     .padding(.vertical, 5)
@@ -102,7 +104,7 @@ struct SettingsView: View {
         case .menuBarAppearance: .systemSymbol("swatchpalette")
         case .hotkeys: .systemSymbol("keyboard")
         case .advanced: .systemSymbol("gearshape.2")
-        case .about: .assetCatalog(.iceCubeStroke)
+        case .about: .assetCatalog(.vanillaMarkStroke)
         }
     }
 }

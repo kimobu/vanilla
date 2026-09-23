@@ -12,10 +12,48 @@
 		1787C4272B16890B002F50DF /* AXSwift in Frameworks */ = {isa = PBXBuildFile; productRef = 1787C4262B16890B002F50DF /* AXSwift */; };
 		17F71BB52B880B4500905CBA /* CompactSlider in Frameworks */ = {isa = PBXBuildFile; productRef = 17F71BB42B880B4500905CBA /* CompactSlider */; };
 		7127A9FF2C4886D100D99DEF /* IfritStatic in Frameworks */ = {isa = PBXBuildFile; productRef = 7127A9FE2C4886D100D99DEF /* IfritStatic */; };
+        A10000000000000000000001 /* LatestTask.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000002; };
+        A10000000000000000000003 /* CaptureGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000004; };
+        A1000000000000000000000D /* Permission.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000E; };
+        A1000000000000000000000F /* IfritStatic in Frameworks */ = {isa = PBXBuildFile; productRef = 7127A9FE2C4886D100D99DEF; };
+        A10000000000000000000010 /* PreferenceImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011; };
+        A10000000000000000000012 /* Defaults.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013; };
+        A10000000000000000000014 /* AccessibleMenuBarItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000015; };
+        A10000000000000000000016 /* MenuBarDividerGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017; };
+        A10000000000000000000018 /* CoalescingTask.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019; };
+        A1000000000000000000001A /* DelayedAction.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001B; };
+        A1000000000000000000001C /* PanelPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001D; };
+        A1000000000000000000001E /* CustomColorPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001F; };
+        A10000000000000000000020 /* RunLoopLocalEventMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000021; };
+        A10000000000000000000022 /* MenuBarPublisherProbes.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000023; };
+        A10000000000000000000024 /* TaskTimeout.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000025; };
+        A10000000000000000000026 /* MenuBarImageContrast.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000027; };
+        A10000000000000000000028 /* MenuBarPublisherRelaunch.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000029; };
+        A1000000000000000000002A /* MenuBarItemImage.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002B; };
+        A1000000000000000000002C /* MenuBarImageBackground.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002D; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		7166832A2A767E6A006ABF84 /* Ice.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Ice.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		7166832A2A767E6A006ABF84 /* Vanilla.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Vanilla.app; sourceTree = BUILT_PRODUCTS_DIR; };
+        A10000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ice/Utilities/LatestTask.swift; sourceTree = SOURCE_ROOT; };
+        A10000000000000000000004 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ice/Utilities/CaptureGeometry.swift; sourceTree = SOURCE_ROOT; };
+        A10000000000000000000005 /* VanillaTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; path = VanillaTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+        A1000000000000000000000E = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ice/Permissions/Permission.swift; sourceTree = SOURCE_ROOT; };
+        A10000000000000000000011 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ice/Utilities/PreferenceImport.swift; sourceTree = SOURCE_ROOT; };
+        A10000000000000000000013 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ice/Utilities/Defaults.swift; sourceTree = SOURCE_ROOT; };
+        A10000000000000000000015 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ice/MenuBar/MenuBarItems/AccessibleMenuBarItem.swift; sourceTree = SOURCE_ROOT; };
+        A10000000000000000000017 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ice/MenuBar/ControlItem/MenuBarDividerGeometry.swift; sourceTree = SOURCE_ROOT; };
+        A10000000000000000000019 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ice/Utilities/CoalescingTask.swift; sourceTree = SOURCE_ROOT; };
+        A1000000000000000000001B = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ice/Utilities/DelayedAction.swift; sourceTree = SOURCE_ROOT; };
+        A1000000000000000000001D = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ice/Utilities/PanelPresentation.swift; sourceTree = SOURCE_ROOT; };
+        A1000000000000000000001F = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ice/UI/Pickers/CustomColorPicker/CustomColorPicker.swift; sourceTree = SOURCE_ROOT; };
+        A10000000000000000000021 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ice/Events/EventMonitors/RunLoopLocalEventMonitor.swift; sourceTree = SOURCE_ROOT; };
+        A10000000000000000000023 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ice/Bridging/MenuBarPublisherProbes.swift; sourceTree = SOURCE_ROOT; };
+        A10000000000000000000025 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ice/Utilities/TaskTimeout.swift; sourceTree = SOURCE_ROOT; };
+        A10000000000000000000027 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ice/Utilities/MenuBarImageContrast.swift; sourceTree = SOURCE_ROOT; };
+        A10000000000000000000029 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ice/MenuBar/Spacing/MenuBarPublisherRelaunch.swift; sourceTree = SOURCE_ROOT; };
+        A1000000000000000000002B = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ice/MenuBar/MenuBarItems/MenuBarItemImage.swift; sourceTree = SOURCE_ROOT; };
+        A1000000000000000000002D = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Ice/Utilities/MenuBarImageBackground.swift; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
@@ -25,12 +63,13 @@
 				Info.plist,
 				Resources/Acknowledgements.rtf,
 			);
-			target = 716683292A767E6A006ABF84 /* Ice */;
+			target = 716683292A767E6A006ABF84 /* Vanilla */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		71BDFBE12C978E2A00EF145F /* Ice */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (71BDFC6C2C978E2A00EF145F /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = Ice; sourceTree = "<group>"; };
+		71BDFBE12C978E2A00EF145F /* Vanilla */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (71BDFC6C2C978E2A00EF145F /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = Ice; sourceTree = "<group>"; };
+        A10000000000000000000006 /* Tests */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = Tests; sourceTree = "<group>"; };
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -46,13 +85,15 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+        A1000000000000000000000A = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000000F, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		716683212A767E6A006ABF84 = {
 			isa = PBXGroup;
 			children = (
-				71BDFBE12C978E2A00EF145F /* Ice */,
+                A10000000000000000000006 /* Tests */,
+				71BDFBE12C978E2A00EF145F /* Vanilla */,
 				7166832B2A767E6A006ABF84 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -60,7 +101,8 @@
 		7166832B2A767E6A006ABF84 /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				7166832A2A767E6A006ABF84 /* Ice.app */,
+                A10000000000000000000005 /* VanillaTests.xctest */,
+				7166832A2A767E6A006ABF84 /* Vanilla.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -68,9 +110,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		716683292A767E6A006ABF84 /* Ice */ = {
+		716683292A767E6A006ABF84 /* Vanilla */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 716683392A767E6B006ABF84 /* Build configuration list for PBXNativeTarget "Ice" */;
+			buildConfigurationList = 716683392A767E6B006ABF84 /* Build configuration list for PBXNativeTarget "Vanilla" */;
 			buildPhases = (
 				716683262A767E6A006ABF84 /* Sources */,
 				716683272A767E6A006ABF84 /* Frameworks */,
@@ -82,9 +124,9 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				71BDFBE12C978E2A00EF145F /* Ice */,
+				71BDFBE12C978E2A00EF145F /* Vanilla */,
 			);
-			name = Ice;
+			name = Vanilla;
 			packageProductDependencies = (
 				175061902B1543DD003144CD /* LaunchAtLogin */,
 				1787C4262B16890B002F50DF /* AXSwift */,
@@ -92,10 +134,23 @@
 				17F71BB42B880B4500905CBA /* CompactSlider */,
 				7127A9FE2C4886D100D99DEF /* IfritStatic */,
 			);
-			productName = Ice;
-			productReference = 7166832A2A767E6A006ABF84 /* Ice.app */;
+			productName = Vanilla;
+			productReference = 7166832A2A767E6A006ABF84 /* Vanilla.app */;
 			productType = "com.apple.product-type.application";
 		};
+        A10000000000000000000007 /* VanillaTests */ = {
+            isa = PBXNativeTarget;
+            buildConfigurationList = A10000000000000000000008;
+            buildPhases = (A10000000000000000000009, A1000000000000000000000A, );
+            buildRules = ();
+            dependencies = ();
+            fileSystemSynchronizedGroups = (A10000000000000000000006, );
+            name = VanillaTests;
+            packageProductDependencies = (7127A9FE2C4886D100D99DEF, );
+            productName = VanillaTests;
+            productReference = A10000000000000000000005;
+            productType = "com.apple.product-type.bundle.unit-test";
+        };
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -111,7 +166,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 716683252A767E6A006ABF84 /* Build configuration list for PBXProject "Ice" */;
+			buildConfigurationList = 716683252A767E6A006ABF84 /* Build configuration list for PBXProject "Vanilla" */;
 			compatibilityVersion = "Xcode 14.0";
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
@@ -131,7 +186,8 @@
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
-				716683292A767E6A006ABF84 /* Ice */,
+                A10000000000000000000007 /* VanillaTests */,
+				716683292A767E6A006ABF84 /* Vanilla */,
 			);
 		};
 /* End PBXProject section */
@@ -176,6 +232,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+        A10000000000000000000009 = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (A1000000000000000000002C, A1000000000000000000002A, A10000000000000000000028, A10000000000000000000026, A10000000000000000000024, A10000000000000000000022, A10000000000000000000020, A1000000000000000000001E, A1000000000000000000001C, A1000000000000000000001A, A10000000000000000000018, A10000000000000000000001, A10000000000000000000003, A1000000000000000000000D, A10000000000000000000010, A10000000000000000000012, A10000000000000000000014, A10000000000000000000016, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
 /* Begin XCBuildConfiguration section */
@@ -215,7 +272,7 @@
 				COPY_PHASE_STRIP = NO;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
-				DEVELOPMENT_TEAM = K2ATHQPJDP;
+				DEVELOPMENT_TEAM = QVCY9D8UQP;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -233,7 +290,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
@@ -279,7 +336,7 @@
 				COPY_PHASE_STRIP = NO;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
-				DEVELOPMENT_TEAM = K2ATHQPJDP;
+				DEVELOPMENT_TEAM = QVCY9D8UQP;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
@@ -291,7 +348,7 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MACOSX_DEPLOYMENT_TARGET = 26.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				SDKROOT = macosx;
@@ -317,18 +374,20 @@
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Ice/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Vanilla;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = YES;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2025 Jordan Baird";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2025 Jordan Baird; © 2026 Vanilla contributors";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 0.11.12;
-				PRODUCT_BUNDLE_IDENTIFIER = com.jordanbaird.Ice;
+				PRODUCT_BUNDLE_IDENTIFIER = com.kimobu.Vanilla;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
 			};
 			name = Debug;
 		};
@@ -349,25 +408,53 @@
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Ice/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Vanilla;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_LSUIElement = YES;
-				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2025 Jordan Baird";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Copyright © 2025 Jordan Baird; © 2026 Vanilla contributors";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 0.11.12;
-				PRODUCT_BUNDLE_IDENTIFIER = com.jordanbaird.Ice;
+				PRODUCT_BUNDLE_IDENTIFIER = com.kimobu.Vanilla;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
-				SWIFT_VERSION = 5.0;
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_VERSION = 6.0;
 			};
 			name = Release;
 		};
+        A1000000000000000000000B = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                CODE_SIGN_STYLE = Automatic;
+                GENERATE_INFOPLIST_FILE = YES;
+                PRODUCT_BUNDLE_IDENTIFIER = com.kimobu.VanillaTests;
+                PRODUCT_NAME = "$(TARGET_NAME)";
+                SWIFT_VERSION = 6.0;
+                SWIFT_STRICT_CONCURRENCY = complete;
+                LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@loader_path/Frameworks", "@executable_path/../Frameworks", );
+            };
+            name = Debug;
+        };
+        A1000000000000000000000C = {
+            isa = XCBuildConfiguration;
+            buildSettings = {
+                CODE_SIGN_STYLE = Automatic;
+                GENERATE_INFOPLIST_FILE = YES;
+                PRODUCT_BUNDLE_IDENTIFIER = com.kimobu.VanillaTests;
+                PRODUCT_NAME = "$(TARGET_NAME)";
+                SWIFT_VERSION = 6.0;
+                SWIFT_STRICT_CONCURRENCY = complete;
+                LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@loader_path/Frameworks", "@executable_path/../Frameworks", );
+            };
+            name = Release;
+        };
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		716683252A767E6A006ABF84 /* Build configuration list for PBXProject "Ice" */ = {
+		716683252A767E6A006ABF84 /* Build configuration list for PBXProject "Vanilla" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				716683372A767E6B006ABF84 /* Debug */,
@@ -376,7 +463,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		716683392A767E6B006ABF84 /* Build configuration list for PBXNativeTarget "Ice" */ = {
+		716683392A767E6B006ABF84 /* Build configuration list for PBXNativeTarget "Vanilla" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				7166833A2A767E6B006ABF84 /* Debug */,
@@ -385,6 +472,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+        A10000000000000000000008 = {isa = XCConfigurationList; buildConfigurations = (A1000000000000000000000B, A1000000000000000000000C, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 /* End XCConfigurationList section */
 
 /* Begin XCRemoteSwiftPackageReference section */
@@ -393,7 +481,7 @@
 			repositoryURL = "https://github.com/sparkle-project/Sparkle";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 2.5.2;
+				minimumVersion = 2.10.0;
 			};
 		};
 		1750618F2B1543DD003144CD /* XCRemoteSwiftPackageReference "LaunchAtLogin-Modern" */ = {
@@ -417,7 +505,7 @@
 			repositoryURL = "https://github.com/buh/CompactSlider";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 1.1.5;
+				minimumVersion = 2.1.0;
 			};
 		};
 		7127A9FB2C4881BC00D99DEF /* XCRemoteSwiftPackageReference "Ifrit" */ = {
@@ -425,7 +513,7 @@
 			repositoryURL = "https://github.com/ukushu/Ifrit";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 2.0.3;
+				minimumVersion = 4.0.0;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

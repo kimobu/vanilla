@@ -118,30 +118,19 @@ struct IceSection<Header: View, Content: View, Footer: View>: View {
     @ViewBuilder
     private var dividedContent: some View {
         if hasDividers {
-            _VariadicView.Tree(IceSectionLayout(spacing: spacing)) {
-                content
-                    .frame(maxWidth: .infinity)
+            Group(subviews: content) { subviews in
+                VStack(alignment: .leading, spacing: spacing) {
+                    ForEach(subviews) { child in
+                        child.frame(maxWidth: .infinity)
+                        if child.id != subviews.last?.id {
+                            Divider()
+                        }
+                    }
+                }
             }
         } else {
             content
                 .frame(maxWidth: .infinity)
-        }
-    }
-}
-
-private struct IceSectionLayout: _VariadicView_UnaryViewRoot {
-    let spacing: CGFloat
-
-    @ViewBuilder
-    func body(children: _VariadicView.Children) -> some View {
-        let last = children.last?.id
-        VStack(alignment: .leading, spacing: spacing) {
-            ForEach(children) { child in
-                child
-                if child.id != last {
-                    Divider()
-                }
-            }
         }
     }
 }

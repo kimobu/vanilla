@@ -8,6 +8,7 @@
 /// An image set contains images for a control item in both the hidden and visible states.
 struct ControlItemImageSet: Codable, Hashable, Identifiable {
     enum Name: String, Codable, Hashable {
+        case vanilla = "Vanilla"
         case arrow = "Arrow"
         case chevron = "Chevron"
         case door = "Door"
@@ -38,13 +39,14 @@ struct ControlItemImageSet: Codable, Hashable, Identifiable {
 extension ControlItemImageSet {
     /// The default image set for the Ice icon.
     static let defaultIceIcon = ControlItemImageSet(
-        name: .dot,
-        hidden: .catalog("DotFill"),
-        visible: .catalog("DotStroke")
+        name: .vanilla,
+        hidden: .catalog("VanillaMarkFill"),
+        visible: .catalog("VanillaMarkStroke")
     )
 
     /// The image sets that the user can choose to display in the Ice icon.
     static let userSelectableIceIcons = [
+        defaultIceIcon,
         ControlItemImageSet(
             name: .arrow,
             hidden: .symbol("arrowshape.left.fill"),

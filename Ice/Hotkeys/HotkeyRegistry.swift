@@ -8,6 +8,7 @@ import Cocoa
 import Combine
 
 /// An object that manages the registration, storage, and unregistration of hotkeys.
+@MainActor
 final class HotkeyRegistry {
     /// The event kinds that a hotkey can be registered for.
     enum EventKind {
@@ -54,11 +55,24 @@ final class HotkeyRegistry {
 
     private let signature = OSType(1231250720) // OSType for Ice
 
+    private var nextID: UInt32 = 0
+
     private var eventHandlerRef: EventHandlerRef?
 
     private var registrations = [UInt32: Registration]()
 
     private var cancellables = Set<AnyCancellable>()
+
+    isolated deinit {
+        for registration in registrations.values {
+            if let reference = registration.hotKeyRef {
+                UnregisterEventHotKey(reference)
+            }
+        }
+        if let eventHandlerRef {
+            RemoveEventHandler(eventHandlerRef)
+        }
+    }
 
     /// Installs the global event handler reference, if it isn't already installed.
     private func installIfNeeded() -> OSStatus {
@@ -88,7 +102,10 @@ final class HotkeyRegistry {
                 return OSStatus(eventNotHandledErr)
             }
             let registry = Unmanaged<HotkeyRegistry>.fromOpaque(userData).takeUnretainedValue()
-            return registry.performEventHandler(for: event)
+            // Carbon dispatches this handler through the application's main event loop.
+            return MainActor.assumeIsolated {
+                registry.performEventHandler(for: event)
+            }
         }
 
         let eventTypes: [EventTypeSpec] = [
@@ -120,12 +137,8 @@ final class HotkeyRegistry {
     ///
     /// - Returns: The registration's identifier on success, `nil` on failure.
     func register(hotkey: Hotkey, eventKind: EventKind, handler: @escaping () -> Void) -> UInt32? {
-        enum Context {
-            static var currentID: UInt32 = 0
-        }
-
         defer {
-            Context.currentID += 1
+            nextID += 1
         }
 
         guard let keyCombination = hotkey.keyCombination else {
@@ -140,7 +153,7 @@ final class HotkeyRegistry {
             return nil
         }
 
-        let id = Context.currentID
+        let id = nextID
 
         guard registrations[id] == nil else {
             Logger.hotkeyRegistry.error("Hotkey already registered for id \(id)")

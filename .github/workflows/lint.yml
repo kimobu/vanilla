@@ -1,23 +1,32 @@
-name: Lint Swift Files
+name: Lint Swift files
+
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
     paths:
-      - ".github/workflows/lint.yml"
-      - ".swiftlint.yml"
-      - "**/*.swift"
+      - .github/workflows/lint.yml
+      - .swiftlint.yml
+      - '**/*.swift'
   pull_request:
     paths:
-      - ".github/workflows/lint.yml"
-      - ".swiftlint.yml"
-      - "**/*.swift"
+      - .github/workflows/lint.yml
+      - .swiftlint.yml
+      - '**/*.swift'
+
+permissions:
+  contents: read
+
 jobs:
   swiftlint:
-    if: '!github.event.pull_request.merged'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install SwiftLint 0.63.2
+        run: |
+          curl --fail --location --silent --show-error \
+            https://github.com/realm/SwiftLint/releases/download/0.63.2/swiftlint_linux_amd64.zip \
+            -o "$RUNNER_TEMP/swiftlint.zip"
+          echo "dd1017cfd20a1457f264590bcb5875a6ee06cd75b9a9d4f77cd43a552499143b  $RUNNER_TEMP/swiftlint.zip" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/swiftlint.zip" -d "$RUNNER_TEMP/swiftlint"
       - name: Run SwiftLint
-        uses: norio-nomura/action-swiftlint@3.2.1
-        with:
-          args: --strict
+        run: '"$RUNNER_TEMP/swiftlint/swiftlint" lint --strict'

@@ -107,7 +107,7 @@ struct MenuBarAppearanceEditor: View {
 
     @ViewBuilder
     private var cannotEdit: some View {
-        Text("Ice cannot edit the appearance of automatically hidden menu bars")
+        Text("Vanilla cannot edit the appearance of automatically hidden menu bars")
             .font(.title3)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
     }
@@ -146,7 +146,10 @@ private struct UnlabeledPartialEditor: View {
 
     @ViewBuilder
     private var tintPicker: some View {
-        IceLabeledContent("Tint") {
+        HStack {
+            Text("Tint")
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityHidden(true)
             HStack {
                 IcePicker("Tint", selection: $configuration.tintKind) {
                     ForEach(MenuBarTintKind.allCases) { tintKind in
@@ -160,6 +163,7 @@ private struct UnlabeledPartialEditor: View {
                     EmptyView()
                 case .solid:
                     CustomColorPicker(
+                        label: String(localized: "Tint color"),
                         selection: $configuration.tintColor,
                         supportsOpacity: false,
                         mode: .crayon
@@ -173,8 +177,10 @@ private struct UnlabeledPartialEditor: View {
                     )
                 }
             }
+            .layoutPriority(1)
             .frame(height: 24)
         }
+        .accessibilityElement(children: .contain)
     }
 
     @ViewBuilder
@@ -190,13 +196,19 @@ private struct UnlabeledPartialEditor: View {
     @ViewBuilder
     private var borderColor: some View {
         if configuration.hasBorder {
-            IceLabeledContent("Border Color") {
+            HStack {
+                Text("Border Color")
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityHidden(true)
                 CustomColorPicker(
+                    label: String(localized: "Border color"),
                     selection: $configuration.borderColor,
                     supportsOpacity: true,
                     mode: .crayon
                 )
+                .layoutPriority(1)
             }
+            .accessibilityElement(children: .contain)
         }
     }
 

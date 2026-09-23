@@ -7,6 +7,7 @@ import Combine
 
 /// A combination of a key and modifiers that can be used to
 /// trigger actions on system-wide key-up or key-down events.
+@MainActor
 final class Hotkey: ObservableObject {
     private weak var appState: AppState?
 
@@ -47,6 +48,7 @@ final class Hotkey: ObservableObject {
 
 extension Hotkey {
     /// An object that manges the lifetime of a hotkey observation.
+    @MainActor
     private final class Listener {
         private weak var appState: AppState?
 
@@ -70,9 +72,7 @@ extension Hotkey {
                 guard let appState else {
                     return
                 }
-                Task {
-                    await hotkey.action.perform(appState: appState)
-                }
+                hotkey.action.perform(appState: appState)
             }
             guard let id else {
                 return nil
@@ -81,7 +81,7 @@ extension Hotkey {
             self.id = id
         }
 
-        deinit {
+        isolated deinit {
             invalidate()
         }
 
@@ -104,7 +104,7 @@ extension Hotkey {
 }
 
 // MARK: Hotkey: Codable
-extension Hotkey: Codable {
+extension Hotkey: @MainActor Codable {
     private enum CodingKeys: CodingKey {
         case keyCombination
         case action
@@ -126,7 +126,7 @@ extension Hotkey: Codable {
 }
 
 // MARK: Hotkey: Equatable
-extension Hotkey: Equatable {
+extension Hotkey: @MainActor Equatable {
     static func == (lhs: Hotkey, rhs: Hotkey) -> Bool {
         lhs.keyCombination == rhs.keyCombination &&
         lhs.action == rhs.action
@@ -134,7 +134,7 @@ extension Hotkey: Equatable {
 }
 
 // MARK: Hotkey: Hashable
-extension Hotkey: Hashable {
+extension Hotkey: @MainActor Hashable {
     func hash(into hasher: inout Hasher) {
         hasher.combine(keyCombination)
         hasher.combine(action)

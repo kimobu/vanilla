@@ -10,27 +10,29 @@ struct HotkeyRecorder<Label: View>: View {
 
     private let label: Label
 
+    private var shortcutDescription: String {
+        if model.isRecording { return String(localized: "Recording") }
+        guard let combination = model.hotkey.keyCombination else { return String(localized: "Not set") }
+        return combination.modifiers.symbolicValue + combination.key.stringValue.capitalized
+    }
+
     init(hotkey: Hotkey, @ViewBuilder label: () -> Label) {
         self._model = StateObject(wrappedValue: HotkeyRecorderModel(hotkey: hotkey))
         self.label = label()
     }
 
     var body: some View {
-        IceLabeledContent {
+        HStack(alignment: .center) {
+            label
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityHidden(true)
             HStack(spacing: 1) {
                 leadingSegment
                 trailingSegment
             }
             .frame(width: 132, height: 24)
-            .alignmentGuide(.firstTextBaseline) { dimension in
-                dimension[VerticalAlignment.center]
-            }
-        } label: {
-            label
-                .alignmentGuide(.firstTextBaseline) { dimension in
-                    dimension[VerticalAlignment.center]
-                }
         }
+        .accessibilityElement(children: .contain)
         .alert(
             "Hotkey is reserved by macOS",
             isPresented: $model.isPresentingReservedByMacOSError
@@ -39,6 +41,7 @@ struct HotkeyRecorder<Label: View>: View {
                 model.isPresentingReservedByMacOSError = false
             }
         }
+        .onDisappear { model.stopRecording() }
     }
 
     @ViewBuilder
@@ -48,6 +51,9 @@ struct HotkeyRecorder<Label: View>: View {
         } label: {
             leadingSegmentLabel
         }
+        .accessibilityLabel { _ in label }
+        .accessibilityValue(shortcutDescription)
+        .accessibilityHint(model.isRecording ? "Type a shortcut, or press Escape to cancel" : "Record a keyboard shortcut")
         .buttonStyle(
             HotkeyRecorderSegmentButtonStyle(
                 segment: .leading,
@@ -76,6 +82,7 @@ struct HotkeyRecorder<Label: View>: View {
             )
         )
         .aspectRatio(1, contentMode: .fit)
+        .accessibilityLabel(model.isRecording ? "Cancel recording" : model.hotkey.isEnabled ? "Clear shortcut" : "Record shortcut")
     }
 
     @ViewBuilder
@@ -112,14 +119,11 @@ struct HotkeyRecorder<Label: View>: View {
     }
 }
 
-private struct HotkeyRecorderSegmentButtonStyle: PrimitiveButtonStyle {
+private struct HotkeyRecorderSegmentButtonStyle: ButtonStyle {
     enum Segment {
         case leading
         case trailing
     }
-
-    @State private var frame = CGRect.zero
-    @State private var isPressed = false
 
     var segment: Segment
     var isHighlighted: Bool
@@ -134,26 +138,15 @@ private struct HotkeyRecorderSegmentButtonStyle: PrimitiveButtonStyle {
     }
 
     func makeBody(configuration: Configuration) -> some View {
-        UnevenRoundedRectangle(cornerRadii: radii, style: .circular)
-            .fill(isHighlighted || isPressed ? .tertiary : .quaternary)
-            .overlay {
-                configuration.label
-                    .lineLimit(1)
-                    .foregroundStyle(.primary)
-                    .padding(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
+        configuration.label
+            .lineLimit(1)
+            .foregroundStyle(.primary)
+            .padding(EdgeInsets(top: 3, leading: 8, bottom: 3, trailing: 8))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background {
+                UnevenRoundedRectangle(cornerRadii: radii, style: .circular)
+                    .fill(isHighlighted || configuration.isPressed ? .tertiary : .quaternary)
             }
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { value in
-                        isPressed = frame.contains(value.location)
-                    }
-                    .onEnded { value in
-                        isPressed = false
-                        if frame.contains(value.location) {
-                            configuration.trigger()
-                        }
-                    }
-            )
-            .onFrameChange(update: $frame)
+            .contentShape(Rectangle())
     }
 }

@@ -3,37 +3,45 @@
 //  Ice
 //
 
-import Combine
 import SwiftUI
 
 private struct WindowReader: NSViewRepresentable {
-    final class Coordinator: ObservableObject {
-        private var cancellable: AnyCancellable?
+    final class ReaderView: NSView {
+        var onWindowChange: (@MainActor (NSWindow?) -> Void)?
+        private var deliveryTask: Task<Void, Never>?
 
-        func configure(for view: NSView, onWindowChange: @MainActor @escaping (NSWindow?) -> Void) {
-            cancellable = view.publisher(for: \.window).sink { window in
-                Task { @MainActor in
-                    onWindowChange(window)
-                }
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            deliveryTask?.cancel()
+            // Deliver after AppKit's update so bindings are not mutated during a SwiftUI render.
+            deliveryTask = Task { [weak self] in
+                guard !Task.isCancelled, let self else { return }
+                onWindowChange?(window)
             }
+        }
+
+        func stop() {
+            deliveryTask?.cancel()
+            deliveryTask = nil
+            onWindowChange = nil
         }
     }
 
     let onWindowChange: @MainActor (NSWindow?) -> Void
 
-    func makeNSView(context: Context) -> NSView {
-        let view = NSView()
-        context.coordinator.configure(for: view) { window in
-            onWindowChange(window)
-        }
+    func makeNSView(context: Context) -> ReaderView {
+        let view = ReaderView()
+        view.onWindowChange = onWindowChange
         return view
     }
 
-    func makeCoordinator() -> Coordinator {
-        return Coordinator()
+    func updateNSView(_ view: ReaderView, context: Context) {
+        view.onWindowChange = onWindowChange
     }
 
-    func updateNSView(_: NSView, context: Context) { }
+    static func dismantleNSView(_ view: ReaderView, coordinator: ()) {
+        view.stop()
+    }
 }
 
 extension View {

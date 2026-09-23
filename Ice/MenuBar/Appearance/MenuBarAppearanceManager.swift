@@ -67,11 +67,9 @@ final class MenuBarAppearanceManager: ObservableObject {
                     return
                 }
                 while let panel = overlayPanels.popFirst() {
-                    panel.orderOut(self)
+                    panel.close()
                 }
-                if Set(overlayPanels.map { $0.owningScreen }) != Set(NSScreen.screens) {
-                    configureOverlayPanels(with: configuration)
-                }
+                configureOverlayPanels(with: configuration)
             }
             .store(in: &c)
 
@@ -87,17 +85,18 @@ final class MenuBarAppearanceManager: ObservableObject {
             }
             .store(in: &c)
 
-        $configuration
+        Publishers.Merge3(
+            $configuration.mapToVoid(),
+            $previewConfiguration.mapToVoid(),
+            NSApp.publisher(for: \.effectiveAppearance).mapToVoid()
+        )
+            .receive(on: DispatchQueue.main)
             .throttle(for: 0.1, scheduler: DispatchQueue.main, latest: true)
-            .sink { [weak self] configuration in
+            .sink { [weak self] in
                 guard let self else {
                     return
                 }
-                // The overlay panels may not have been configured yet. Since some of the
-                // properties on the manager might call for them, try to configure now.
-                if overlayPanels.isEmpty {
-                    configureOverlayPanels(with: configuration)
-                }
+                configureOverlayPanels(with: configuration)
             }
             .store(in: &c)
 
@@ -107,7 +106,7 @@ final class MenuBarAppearanceManager: ObservableObject {
     /// Returns a Boolean value that indicates whether a set of overlay panels
     /// is needed for the given configuration.
     private func needsOverlayPanels(for configuration: MenuBarAppearanceConfigurationV2) -> Bool {
-        let current = configuration.current
+        let current = previewConfiguration ?? configuration.current
         if current.hasShadow {
             return true
         }
@@ -134,6 +133,10 @@ final class MenuBarAppearanceManager: ObservableObject {
             }
             return
         }
+
+        // Existing panels observe configuration changes themselves. Only create
+        // replacements after the old set has been closed or effects are enabled.
+        guard overlayPanels.isEmpty else { return }
 
         var overlayPanels = Set<MenuBarOverlayPanel>()
         for screen in NSScreen.screens {

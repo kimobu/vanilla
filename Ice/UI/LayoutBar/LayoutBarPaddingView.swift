@@ -9,6 +9,7 @@ import Combine
 /// A Cocoa view that manages the menu bar layout interface.
 final class LayoutBarPaddingView: NSView {
     private let container: LayoutBarContainer
+    private var moveTask: Task<Void, Never>?
 
     /// The section whose items are represented.
     var section: MenuBarSection {
@@ -66,6 +67,41 @@ final class LayoutBarPaddingView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    isolated deinit {
+        moveTask?.cancel()
+    }
+
+    /// Reorders one step within this section for assistive technology users.
+    func moveAdjacent(_ view: LayoutBarItemView, offset: Int) -> Bool {
+        guard
+            offset == -1 || offset == 1,
+            moveTask == nil,
+            container.canSetArrangedViews,
+            container.appState != nil,
+            view.isEnabled,
+            let index = arrangedViews.firstIndex(of: view),
+            arrangedViews.indices.contains(index + offset),
+            arrangedViews[index + offset].isEnabled
+        else { return false }
+        let target = arrangedViews[index + offset].item
+        move(item: view.item, to: offset < 0 ? .leftOfItem(target) : .rightOfItem(target))
+        return true
+    }
+
+    func moveToSection(_ view: LayoutBarItemView, name: MenuBarSection.Name) -> Bool {
+        guard
+            moveTask == nil,
+            container.canSetArrangedViews,
+            view.isEnabled,
+            arrangedViews.contains(view),
+            name != section.name,
+            name == .visible || view.item.canBeHidden,
+            let destination = container.appState?.itemManager.movementDestination(for: name)
+        else { return false }
+        move(item: view.item, to: destination)
+        return true
+    }
+
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         container.updateArrangedViewsForDrag(with: sender, phase: .entered)
     }
@@ -85,12 +121,8 @@ final class LayoutBarPaddingView: NSView {
     }
 
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        defer {
-            DispatchQueue.main.async {
-                self.container.canSetArrangedViews = true
-            }
-        }
-
+        // A fast drag may reach its final position between draggingUpdated callbacks.
+        container.updateArrangedViewsForDrag(with: sender, phase: .updated)
         guard let draggingSource = sender.draggingSource as? LayoutBarItemView else {
             return false
         }
@@ -99,14 +131,8 @@ final class LayoutBarPaddingView: NSView {
             if arrangedViews.count == 1 {
                 // dragging source is the only view in the layout bar, so we
                 // need to find a target item
-                let items = MenuBarItem.getMenuBarItems(onScreenOnly: false, activeSpaceOnly: true)
-                let targetItem: MenuBarItem? = switch section.name {
-                case .visible: nil // visible section always has more than 1 item
-                case .hidden: items.first { $0.info == .hiddenControlItem }
-                case .alwaysHidden: items.first { $0.info == .alwaysHiddenControlItem }
-                }
-                if let targetItem {
-                    move(item: draggingSource.item, to: .leftOfItem(targetItem))
+                if let destination = container.appState?.itemManager.movementDestination(for: section.name) {
+                    move(item: draggingSource.item, to: destination)
                 } else {
                     Logger.layoutBar.error("No target item for layout bar drag")
                 }
@@ -125,14 +151,21 @@ final class LayoutBarPaddingView: NSView {
     }
 
     private func move(item: MenuBarItem, to destination: MenuBarItemManager.MoveDestination) {
-        guard let appState = container.appState else {
+        guard moveTask == nil, let appState = container.appState else {
             return
         }
-        Task {
-            try await Task.sleep(for: .milliseconds(25))
+        moveTask = Task { [weak self] in
+            defer { self?.moveTask = nil }
             do {
+                try await Task.sleep(for: .milliseconds(25))
                 try await appState.itemManager.slowMove(item: item, to: destination)
                 appState.itemManager.removeTempShownItemFromCache(with: item.info)
+                // Moving into a collapsed section invalidates its screen bounds.
+                // Refresh after placement so Layout does not retain an image of
+                // the previous position or require reopening the pane.
+                await appState.itemManager.refreshImagesForPresentation()
+            } catch is CancellationError {
+                return
             } catch {
                 Logger.layoutBar.error("Error moving menu bar item: \(error)")
                 let alert = NSAlert(error: error)

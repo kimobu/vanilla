@@ -82,12 +82,13 @@ final class EventTap {
         }
     }
 
-    private let runLoop = CFRunLoopGetCurrent()
+    private let runLoop = CFRunLoopGetMain()
     private let mode: CFRunLoopMode = .commonModes
-    private nonisolated let callback: (EventTap, CGEventTapProxy, CGEventType, CGEvent) -> Unmanaged<CGEvent>?
+    private let callback: @MainActor (EventTap, CGEventTapProxy, CGEventType, CGEvent) -> Unmanaged<CGEvent>?
 
     private var machPort: CFMachPort?
     private var source: CFRunLoopSource?
+    private var timeoutTask: Task<Void, Never>?
 
     /// The label associated with the event tap.
     let label: String
@@ -140,7 +141,8 @@ final class EventTap {
         self.source = source
     }
 
-    deinit {
+    isolated deinit {
+        timeoutTask?.cancel()
         guard let machPort else {
             return
         }
@@ -155,8 +157,24 @@ final class EventTap {
         type: CGEventType,
         event: CGEvent
     ) -> Unmanaged<CGEvent>? {
-        let callback = eventTap.callback
-        return callback(eventTap, proxy, type, event)
+        // The source is installed only on the main run loop. Decisions must be synchronous.
+        let arguments = CallbackArguments(proxy: proxy, type: type, event: event)
+        return MainActor.assumeIsolated {
+            CallbackResult(event: eventTap.callback(eventTap, arguments.proxy, arguments.type, arguments.event))
+        }.event
+    }
+
+    // MainActor.assumeIsolated requires a Sendable return, even for this synchronous
+    // C trampoline. The borrowed result is returned immediately to Core Graphics on
+    // the same main run loop; it is never retained by a task or sent to another thread.
+    private struct CallbackArguments: @unchecked Sendable {
+        let proxy: CGEventTapProxy
+        let type: CGEventType
+        let event: CGEvent
+    }
+
+    private struct CallbackResult: @unchecked Sendable {
+        let event: Unmanaged<CGEvent>?
     }
 
     private static func createTapMachPort(
@@ -217,6 +235,8 @@ final class EventTap {
 
     /// Enables the event tap.
     func enable() {
+        timeoutTask?.cancel()
+        timeoutTask = nil
         withUnwrappedComponents { runLoop, source, machPort in
             CFRunLoopAddSource(runLoop, source, mode)
             CGEvent.tapEnable(tap: machPort, enable: true)
@@ -226,8 +246,12 @@ final class EventTap {
     /// Enables the event tap with the given timeout.
     func enable(timeout: Duration, onTimeout: @escaping () -> Void) {
         enable()
-        Task { [weak self] in
-            try await Task.sleep(for: timeout)
+        timeoutTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: timeout)
+            } catch {
+                return
+            }
             if self?.isEnabled == true {
                 onTimeout()
             }
@@ -236,6 +260,8 @@ final class EventTap {
 
     /// Disables the event tap.
     func disable() {
+        timeoutTask?.cancel()
+        timeoutTask = nil
         withUnwrappedComponents { runLoop, source, machPort in
             CFRunLoopRemoveSource(runLoop, source, mode)
             CGEvent.tapEnable(tap: machPort, enable: false)
@@ -251,7 +277,7 @@ private func handleEvent(
     refcon: UnsafeMutableRawPointer?
 ) -> Unmanaged<CGEvent>? {
     guard let refcon else {
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
     }
     let eventTap = Unmanaged<EventTap>.fromOpaque(refcon).takeUnretainedValue()
     return EventTap.performCallback(for: eventTap, proxy: proxy, type: type, event: event)

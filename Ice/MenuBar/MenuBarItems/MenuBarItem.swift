@@ -8,48 +8,88 @@ import Cocoa
 // MARK: - MenuBarItem
 
 /// A representation of an item in the menu bar.
-struct MenuBarItem {
-    /// The item's window.
-    let window: WindowInfo
+struct MenuBarItem: Identifiable {
+    enum Identifier: Hashable {
+        case window(CGWindowID)
+        case accessibility(UUID)
+    }
+
+    private enum Source {
+        case window(WindowInfo)
+        case accessibility(AccessibleMenuBarItem)
+    }
+
+    private let source: Source
+
+    var accessibleItem: AccessibleMenuBarItem? {
+        if case .accessibility(let item) = source { return item }
+        return nil
+    }
+
+    var id: Identifier {
+        switch source {
+        case .window(let window): .window(window.windowID)
+        case .accessibility(let item): .accessibility(item.id)
+        }
+    }
 
     /// The menu bar item info associated with this item.
     let info: MenuBarItemInfo
 
     /// The identifier of the item's window.
-    var windowID: CGWindowID {
-        window.windowID
+    var windowID: CGWindowID? {
+        if case .window(let window) = source { return window.windowID }
+        return nil
     }
 
     /// The frame of the item's window.
     var frame: CGRect {
-        window.frame
+        switch source {
+        case .window(let window): window.frame
+        case .accessibility(let item): item.frame ?? .null
+        }
     }
 
     /// The title of the item's window.
     var title: String? {
-        window.title
+        switch source {
+        case .window(let window): window.title
+        case .accessibility(let item): item.accessibilityIdentifier
+        }
     }
 
     /// A Boolean value that indicates whether the item is on screen.
     var isOnScreen: Bool {
-        window.isOnScreen
+        switch source {
+        case .window(let window): window.isOnScreen
+        case .accessibility(let item): item.frame.map { frame in NSScreen.screens.contains { CGDisplayBounds($0.displayID).contains(frame) } } ?? false
+        }
     }
 
     /// A Boolean value that indicates whether the item can be moved.
     var isMovable: Bool {
+        if let item = accessibleItem {
+            return !["com.apple.menuextra.clock", "com.apple.menuextra.siri", "com.apple.menuextra.controlcenter"].contains(item.accessibilityIdentifier)
+        }
         let immovableItems = Set(MenuBarItemInfo.immovableItems)
         return !immovableItems.contains(info)
     }
 
     /// A Boolean value that indicates whether the item can be hidden.
     var canBeHidden: Bool {
+        if let item = accessibleItem {
+            return !["com.apple.menuextra.audiovideo", "com.apple.menuextra.facetime", "com.apple.menuextra.musicrecognition"].contains(item.accessibilityIdentifier)
+        }
         let nonHideableItems = Set(MenuBarItemInfo.nonHideableItems)
         return !nonHideableItems.contains(info)
     }
 
     /// The process identifier of the application that owns the item.
     var ownerPID: pid_t {
-        window.ownerPID
+        switch source {
+        case .window(let window): window.ownerPID
+        case .accessibility(let item): item.processID
+        }
     }
 
     /// The name of the application that owns the item.
@@ -57,17 +97,26 @@ struct MenuBarItem {
     /// This may have a value when ``owningApplication`` does not have
     /// a localized name.
     var ownerName: String? {
-        window.ownerName
+        switch source {
+        case .window(let window): window.ownerName
+        case .accessibility(let item): item.applicationName
+        }
     }
 
     /// The application that owns the item.
     var owningApplication: NSRunningApplication? {
-        window.owningApplication
+        switch source {
+        case .window(let window): window.owningApplication
+        case .accessibility(let item): NSRunningApplication(processIdentifier: item.processID)
+        }
     }
 
     /// A name associated with the item that is suited for display to
     /// the user.
     var displayName: String {
+        if let item = accessibleItem {
+            return item.label.flatMap { $0.isEmpty ? nil : $0 } ?? item.applicationName
+        }
         var fallback: String { "Unknown" }
         guard let owningApplication else {
             return ownerName ?? title ?? fallback
@@ -111,13 +160,29 @@ struct MenuBarItem {
     /// A Boolean value that indicates whether the item is currently
     /// in the menu bar.
     var isCurrentlyInMenuBar: Bool {
+        guard let windowID else { return isOnScreen }
         let list = Set(Bridging.getWindowList(option: .menuBarItems))
         return list.contains(windowID)
     }
 
     /// A string to use for logging purposes.
     var logString: String {
-        String(describing: info)
+        if let item = accessibleItem {
+            return "Accessibility item \(item.id)"
+        }
+        return String(describing: info)
+    }
+
+    /// Runtime cache keys keep duplicate or unnamed AX items distinct. These keys
+    /// are not saved preferences; control identifiers retain their existing meaning.
+    init(accessibleItem item: AccessibleMenuBarItem) {
+        source = .accessibility(item)
+        let isControl = item.bundleIdentifier == Constants.bundleIdentifier &&
+            ["SItem", "HItem", "AHItem"].contains(item.accessibilityIdentifier)
+        info = MenuBarItemInfo(
+            namespace: MenuBarItemInfo.Namespace(item.bundleIdentifier),
+            title: isControl ? (item.accessibilityIdentifier ?? "") : "AX:\(item.id)"
+        )
     }
 
     /// Creates a menu bar item from the given window.
@@ -126,7 +191,7 @@ struct MenuBarItem {
     /// it is a valid menu bar item window. Only call this initializer if you are
     /// certain that the window is valid.
     private init(uncheckedItemWindow itemWindow: WindowInfo) {
-        self.window = itemWindow
+        self.source = .window(itemWindow)
         self.info = MenuBarItemInfo(uncheckedItemWindow: itemWindow)
     }
 
@@ -207,14 +272,18 @@ extension MenuBarItem {
 // MARK: MenuBarItem: Equatable
 extension MenuBarItem: Equatable {
     static func == (lhs: MenuBarItem, rhs: MenuBarItem) -> Bool {
-        lhs.window == rhs.window
+        switch (lhs.source, rhs.source) {
+        case (.window(let lhs), .window(let rhs)): lhs == rhs
+        case (.accessibility(let lhs), .accessibility(let rhs)): lhs == rhs
+        default: false
+        }
     }
 }
 
 // MARK: MenuBarItem: Hashable
 extension MenuBarItem: Hashable {
     func hash(into hasher: inout Hasher) {
-        hasher.combine(window)
+        hasher.combine(id)
     }
 }
 

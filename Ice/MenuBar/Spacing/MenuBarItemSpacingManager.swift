@@ -4,7 +4,6 @@
 //
 
 import Cocoa
-import Combine
 
 /// Manager for menu bar item spacing.
 @MainActor
@@ -28,7 +27,7 @@ final class MenuBarItemSpacingManager {
         let failedApps: [String]
 
         var errorDescription: String? {
-            "The following applications failed to quit and were not restarted:\n" + failedApps.joined(separator: "\n")
+            "The following applications could not be restarted:\n" + failedApps.joined(separator: "\n")
         }
 
         var recoverySuggestion: String? {
@@ -39,33 +38,25 @@ final class MenuBarItemSpacingManager {
     /// Delay before force terminating an app.
     private let forceTerminateDelay = 1
 
-    /// The offset to apply to the default spacing and padding.
-    /// Does not take effect until ``applyOffset()`` is called.
-    var offset = 0
-
-    /// Runs a command with the given arguments.
-    private func runCommand(_ command: String, with arguments: [String]) async throws {
-        let process = Process()
-
-        process.executableURL = URL(filePath: "/usr/bin/env")
-        process.arguments = CollectionOfOne(command) + arguments
-
-        let task = Task.detached {
-            try process.run()
-            process.waitUntilExit()
+    /// Writes the same current-user, current-host global domain as `defaults -currentHost`.
+    /// https://developer.apple.com/documentation/corefoundation/cfpreferencessetvalue(_:_:_:_:_:)
+    private func writePreferences(offset: Int) throws {
+        struct PreferencesError: LocalizedError {
+            var errorDescription: String? { "Could not save menu bar spacing." }
         }
-
-        return try await task.value
-    }
-
-    /// Removes the value for the specified key.
-    private func removeValue(forKey key: Key) async throws {
-        try await runCommand("defaults", with: ["-currentHost", "delete", "-globalDomain", key.rawValue])
-    }
-
-    /// Sets the value for the specified key to the key's default value plus the given offset.
-    private func setOffset(_ offset: Int, forKey key: Key) async throws {
-        try await runCommand("defaults", with: ["-currentHost", "write", "-globalDomain", key.rawValue, "-int", String(key.defaultValue + offset)])
+        for key in [Key.spacing, .padding] {
+            let value: NSNumber? = offset == 0 ? nil : NSNumber(value: key.defaultValue + offset)
+            CFPreferencesSetValue(
+                key.rawValue as CFString,
+                value,
+                kCFPreferencesAnyApplication,
+                kCFPreferencesCurrentUser,
+                kCFPreferencesCurrentHost
+            )
+        }
+        guard CFPreferencesSynchronize(kCFPreferencesAnyApplication, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost) else {
+            throw PreferencesError()
+        }
     }
 
     /// Returns a log string for the given app.
@@ -74,7 +65,7 @@ final class MenuBarItemSpacingManager {
     }
 
     /// Asynchronously signals the given app to quit.
-    private func signalAppToQuit(_ app: NSRunningApplication) async throws {
+    private func signalAppToQuit(_ app: NSRunningApplication, forceImmediately: Bool = false) async throws {
         if app.isTerminated {
             Logger.spacing.debug("Application \"\(logString(for: app))\" is already terminated")
             return
@@ -82,45 +73,93 @@ final class MenuBarItemSpacingManager {
             Logger.spacing.debug("Signaling application \"\(logString(for: app))\" to quit")
         }
 
-        app.terminate()
+        let waiter = TerminationWaiter(app: app, forceTerminateDelay: forceTerminateDelay)
+        try await waiter.wait(forceImmediately: forceImmediately)
+        Logger.spacing.debug("Application \"\(logString(for: app))\" terminated successfully")
+    }
 
-        var cancellable: AnyCancellable?
-        return try await withCheckedThrowingContinuation { continuation in
-            let timeoutTask = Task {
-                try await Task.sleep(for: .seconds(forceTerminateDelay))
-                if !app.isTerminated {
-                    Logger.spacing.debug("Application \"\(logString(for: app))\" did not terminate within \(forceTerminateDelay) seconds, attempting to force terminate")
-                    app.forceTerminate()
-                }
-            }
+    /// Owns the observation, deadline, and continuation for one app termination.
+    @MainActor
+    private final class TerminationWaiter {
+        private let app: NSRunningApplication
+        private let forceTerminateDelay: Int
+        private var observation: NSKeyValueObservation?
+        private var timeout: Task<Void, Never>?
+        private var continuation: CheckedContinuation<Void, any Error>?
 
-            cancellable = app.publisher(for: \.isTerminated).sink { [weak self] isTerminated in
-                guard
-                    let self,
-                    isTerminated
-                else {
-                    return
+        init(app: NSRunningApplication, forceTerminateDelay: Int) {
+            self.app = app
+            self.forceTerminateDelay = forceTerminateDelay
+        }
+
+        func wait(forceImmediately: Bool) async throws {
+            try Task.checkCancellation()
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    self.continuation = continuation
+                    observation = app.observe(\.isTerminated, options: [.initial, .new]) { [weak self] _, change in
+                        guard change.newValue == true else { return }
+                        Task { @MainActor [weak self] in self?.finish(.success(())) }
+                    }
+                    timeout = Task { [weak self, forceTerminateDelay] in
+                        do {
+                            try await Task.sleep(for: .seconds(forceTerminateDelay))
+                            guard let self else { return }
+                            if !app.isTerminated { app.forceTerminate() }
+                            try await Task.sleep(for: .seconds(3))
+                            finish(app.isTerminated ? .success(()) : .failure(TaskTimeoutError()))
+                        } catch is CancellationError {
+                            return
+                        } catch {
+                            self?.finish(.failure(error))
+                        }
+                    }
+                    if forceImmediately {
+                        app.forceTerminate()
+                    } else {
+                        app.terminate()
+                    }
                 }
-                timeoutTask.cancel()
-                cancellable?.cancel()
-                Logger.spacing.debug("Application \"\(logString(for: app))\" terminated successfully")
-                continuation.resume()
+            } onCancel: {
+                Task { @MainActor [weak self] in self?.finish(.failure(CancellationError())) }
             }
+        }
+
+        private func finish(_ result: Result<Void, any Error>) {
+            guard let continuation else { return }
+            self.continuation = nil
+            observation = nil
+            timeout?.cancel()
+            timeout = nil
+            continuation.resume(with: result)
         }
     }
 
+    private func runningProcessIDs(bundleIdentifier: String) -> Set<pid_t> {
+        Set(NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+            .filter { !$0.isTerminated }
+            .map(\.processIdentifier))
+    }
+
     /// Asynchronously launches the app at the given URL.
-    private nonisolated func launchApp(at applicationURL: URL, bundleIdentifier: String) async throws {
-        if let app = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == bundleIdentifier }) {
-            Logger.spacing.debug("Application \"\(logString(for: app))\" is already open, so skipping launch")
+    private func launchApp(at applicationURL: URL, bundleIdentifier: String, relaunch: MenuBarPublisherRelaunch) async throws {
+        struct RelaunchError: Error { }
+        let action = relaunch.action(currentProcessIDs: runningProcessIDs(bundleIdentifier: bundleIdentifier))
+        if action == .alreadyRelaunched {
             return
         }
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = false
         configuration.addsToRecentItems = false
-        configuration.createsNewApplicationInstance = false
+        // A surviving helper can share the publisher's bundle identifier.
+        // Reopening that helper does not restore the terminated menu-bar process.
+        // Verified with Jump Desktop Connect on macOS 26.5; see the spacing audit.
+        configuration.createsNewApplicationInstance = action == .launchNewInstance
         configuration.promptsUserIfNeeded = false
-        try await NSWorkspace.shared.openApplication(at: applicationURL, configuration: configuration)
+        let app = try await NSWorkspace.shared.openApplication(at: applicationURL, configuration: configuration)
+        guard !app.isTerminated, !relaunch.originalProcessIDs.contains(app.processIdentifier) else {
+            throw RelaunchError()
+        }
     }
 
     /// Asynchronously relaunches the given app.
@@ -132,66 +171,76 @@ final class MenuBarItemSpacingManager {
         else {
             throw RelaunchError()
         }
+        let relaunch = MenuBarPublisherRelaunch(originalProcessIDs: runningProcessIDs(bundleIdentifier: bundleIdentifier))
+        if bundleIdentifier == "com.apple.Spotlight" {
+            // Spotlight's launch agent restarts after an unsuccessful exit. A
+            // normal quit stays stopped, and Launch Services cannot reopen it.
+            // Observed on macOS 26.5; see docs/audits/2026-09-21-spacing-runtime.txt.
+            try await signalAppToQuit(app, forceImmediately: true)
+            let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+            repeat {
+                try Task.checkCancellation()
+                if relaunch.action(currentProcessIDs: runningProcessIDs(bundleIdentifier: bundleIdentifier)) == .alreadyRelaunched {
+                    return
+                }
+                try await Task.sleep(for: .milliseconds(100))
+            } while ContinuousClock.now < deadline
+            throw RelaunchError()
+        }
         try await signalAppToQuit(app)
         if app.isTerminated {
-            try await launchApp(at: url, bundleIdentifier: bundleIdentifier)
+            try await launchApp(at: url, bundleIdentifier: bundleIdentifier, relaunch: relaunch)
         } else {
             throw RelaunchError()
         }
     }
 
-    /// Applies the current ``offset``.
+    private func relaunchForSpacing(pid: pid_t) async -> String? {
+        guard
+            !Task.isCancelled,
+            let app = NSRunningApplication(processIdentifier: pid),
+            app.bundleIdentifier != "com.apple.controlcenter",
+            app.bundleIdentifier != "com.apple.MenuBarAgent",
+            app != .current
+        else { return nil }
+        do {
+            try await relaunchApp(app)
+            return nil
+        } catch {
+            guard let name = app.localizedName else { return nil }
+            return name
+        }
+    }
+
+    /// Writes the requested offset before recording it as applied in settings.
     ///
     /// - Note: Calling this restarts all apps with a menu bar item.
-    func applyOffset() async throws {
-        if offset == 0 {
-            try await removeValue(forKey: .spacing)
-            try await removeValue(forKey: .padding)
-        } else {
-            try await setOffset(offset, forKey: .spacing)
-            try await setOffset(offset, forKey: .padding)
-        }
-
-        try? await Task.sleep(for: .milliseconds(100))
-
-        let items = MenuBarItem.getMenuBarItems(onScreenOnly: false, activeSpaceOnly: true)
-        let pids = Set(items.map { $0.ownerPID })
+    func applyOffset(_ offset: Int, using appState: AppState) async throws {
+        try Task.checkCancellation()
+        let pids = try await appState.itemManager.menuBarPublisherProcessIDs()
+        try Task.checkCancellation()
+        try writePreferences(offset: offset)
+        // Discovery or a failed write must leave the previous applied value
+        // intact. Once written, keep it even if an app cannot be restarted.
+        appState.settingsManager.generalSettingsManager.itemSpacingOffset = CGFloat(offset)
+        try await Task.sleep(for: .milliseconds(100))
 
         var failedApps = [String]()
 
-        await withTaskGroup(of: Void.self) { group in
+        await withTaskGroup(of: String?.self) { group in
             for pid in pids {
-                guard
-                    let app = NSRunningApplication(processIdentifier: pid),
-                    app.bundleIdentifier != "com.apple.controlcenter", // ControlCenter handles its own relaunch, so skip it.
-                    app != .current
-                else {
-                    break
+                group.addTask { [self] in
+                    await relaunchForSpacing(pid: pid)
                 }
-                group.addTask { @MainActor in
-                    do {
-                        try await self.relaunchApp(app)
-                    } catch {
-                        guard let name = app.localizedName else {
-                            return
-                        }
-                        if app.bundleIdentifier == "com.apple.Spotlight" {
-                            // Spotlight automatically relaunches, so only consider it a failure if it never quit.
-                            if
-                                let latestSpotlightInstance = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.Spotlight").first,
-                                latestSpotlightInstance.processIdentifier == app.processIdentifier
-                            {
-                                failedApps.append(name)
-                            }
-                        } else {
-                            failedApps.append(name)
-                        }
-                    }
+            }
+            for await failedApp in group {
+                if let failedApp {
+                    failedApps.append(failedApp)
                 }
             }
         }
 
-        try? await Task.sleep(for: .milliseconds(100))
+        try await Task.sleep(for: .milliseconds(100))
 
         if let app = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.controlcenter").first {
             do {

@@ -1,5 +1,6 @@
 included:
   - Ice
+  - Tests
 
 disabled_rules:
   - cyclomatic_complexity

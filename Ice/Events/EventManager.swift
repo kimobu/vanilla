@@ -15,6 +15,11 @@ final class EventManager {
     /// Storage for internal observers.
     private var cancellables = Set<AnyCancellable>()
 
+    private let hoverAction = DelayedAction<Bool>()
+    private let clickAction = DelayedAction<UUID>()
+    private let rehideAction = DelayedAction<UUID>()
+    private var isMonitoring = false
+
     // MARK: Monitors
 
     /// Monitor for mouse down events.
@@ -89,8 +94,14 @@ final class EventManager {
 
     /// Sets up the manager.
     func performSetup() {
+        performTeardown()
         startAll()
         configureCancellables()
+    }
+
+    func performTeardown() {
+        stopAll()
+        cancellables.removeAll()
     }
 
     /// Configures the internal observers for the manager.
@@ -126,6 +137,7 @@ final class EventManager {
 
     /// Starts all monitors.
     func startAll() {
+        isMonitoring = true
         for monitor in allMonitors {
             monitor.start()
         }
@@ -133,6 +145,10 @@ final class EventManager {
 
     /// Stops all monitors.
     func stopAll() {
+        isMonitoring = false
+        hoverAction.cancel()
+        clickAction.cancel()
+        rehideAction.cancel()
         for monitor in allMonitors {
             monitor.stop()
         }
@@ -146,6 +162,7 @@ extension EventManager {
     // MARK: Handle Show On Click
 
     private func handleShowOnClick() {
+        clickAction.cancel()
         guard
             let appState,
             appState.settingsManager.generalSettingsManager.showOnClick,
@@ -154,14 +171,15 @@ extension EventManager {
             return
         }
 
-        Task {
-            // Short delay helps the toggle action feel more natural.
-            try? await Task.sleep(for: .milliseconds(50))
-
-            if NSEvent.modifierFlags == .control {
+        let modifiers = NSEvent.modifierFlags
+        // Short delay helps the toggle action feel more natural. Keep the
+        // modifiers from the click even if the user releases them during it.
+        clickAction.schedule(key: UUID(), after: .milliseconds(50)) { [weak self, weak appState] in
+            guard let self, let appState, appState.settingsManager.generalSettingsManager.showOnClick else { return }
+            if modifiers == .control {
                 handleShowRightClickMenu()
             } else if
-                NSEvent.modifierFlags == .option,
+                modifiers == .option,
                 appState.settingsManager.advancedSettingsManager.canToggleAlwaysHiddenSection
             {
                 if let alwaysHiddenSection = appState.menuBarManager.section(withName: .alwaysHidden) {
@@ -178,6 +196,7 @@ extension EventManager {
     // MARK: Handle Smart Rehide
 
     private func handleSmartRehide(with event: NSEvent) {
+        rehideAction.cancel()
         guard
             let appState,
             appState.settingsManager.generalSettingsManager.autoRehide,
@@ -207,11 +226,14 @@ extension EventManager {
             return
         }
 
-        Task {
-            let initialSpaceID = Bridging.activeSpaceID
-
-            // Sleep for a bit to give the window under the mouse a chance to focus.
-            try? await Task.sleep(for: .seconds(0.25))
+        let initialSpaceID = Bridging.activeSpaceID
+        // Give the window under the mouse a chance to focus.
+        rehideAction.schedule(key: UUID(), after: .milliseconds(250)) { [weak appState] in
+            guard
+                let appState,
+                appState.settingsManager.generalSettingsManager.autoRehide,
+                case .smart = appState.settingsManager.generalSettingsManager.rehideStrategy
+            else { return }
 
             // If clicking caused a space change, don't bother with the window check.
             if Bridging.activeSpaceID != initialSpaceID {
@@ -346,54 +368,41 @@ extension EventManager {
     // MARK: Handle Show On Hover
 
     private func handleShowOnHover() {
-        guard let appState else {
-            return
-        }
-
-        // Make sure the "ShowOnHover" feature is enabled and not prevented.
         guard
-            appState.settingsManager.generalSettingsManager.showOnHover,
-            !appState.isShowOnHoverPrevented
+            let appState,
+            let shouldShow = hoverVisibilityRequest
         else {
+            hoverAction.cancel()
             return
         }
-
-        // Only continue if we have a hidden section (we should).
-        guard let hiddenSection = appState.menuBarManager.section(withName: .hidden) else {
-            return
-        }
-
         let delay = appState.settingsManager.advancedSettingsManager.showOnHoverDelay
-
-        Task {
-            if hiddenSection.isHidden {
-                guard self.isMouseInsideEmptyMenuBarSpace else {
-                    return
-                }
-                try? await Task.sleep(for: .seconds(delay))
-                // Make sure the mouse is still inside.
-                guard self.isMouseInsideEmptyMenuBarSpace else {
-                    return
-                }
-                hiddenSection.show()
+        hoverAction.schedule(key: shouldShow, after: .seconds(delay)) { [weak self] in
+            guard
+                let self,
+                hoverVisibilityRequest == shouldShow,
+                let section = self.appState?.menuBarManager.section(withName: .hidden)
+            else { return }
+            if shouldShow {
+                section.show()
             } else {
-                guard
-                    !self.isMouseInsideMenuBar,
-                    !self.isMouseInsideIceBar
-                else {
-                    return
-                }
-                try? await Task.sleep(for: .seconds(delay))
-                // Make sure the mouse is still outside.
-                guard
-                    !self.isMouseInsideMenuBar,
-                    !self.isMouseInsideIceBar
-                else {
-                    return
-                }
-                hiddenSection.hide()
+                section.hide()
             }
         }
+    }
+
+    /// Nil means the current pointer position does not request a visibility change.
+    private var hoverVisibilityRequest: Bool? {
+        guard
+            isMonitoring,
+            let appState,
+            appState.settingsManager.generalSettingsManager.showOnHover,
+            !appState.isShowOnHoverPrevented,
+            let section = appState.menuBarManager.section(withName: .hidden)
+        else { return nil }
+        if section.isHidden {
+            return isMouseInsideEmptyMenuBarSpace ? true : nil
+        }
+        return !isMouseInsideMenuBar && !isMouseInsideIceBar ? false : nil
     }
 
     // MARK: Handle Show On Scroll
@@ -490,7 +499,7 @@ extension EventManager {
         else {
             return false
         }
-        let menuBarItems = MenuBarItem.getMenuBarItems(on: screen.displayID, onScreenOnly: true, activeSpaceOnly: true)
+        let menuBarItems = appState?.itemManager.menuBarItems(on: screen.displayID, onScreenOnly: true, activeSpaceOnly: true) ?? []
         return menuBarItems.contains { $0.frame.contains(mouseLocation) }
     }
 

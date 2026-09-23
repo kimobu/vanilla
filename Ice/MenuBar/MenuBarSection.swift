@@ -42,8 +42,8 @@ final class MenuBarSection {
     /// The shared app state.
     private weak var appState: AppState?
 
-    /// A timer that manages rehiding the section.
-    private var rehideTimer: Timer?
+    /// Owns the pending timed-rehide request.
+    private let rehideAction = DelayedAction<Bool>()
 
     /// An event monitor that handles starting the rehide timer when the mouse
     /// is outside of the menu bar.
@@ -127,6 +127,10 @@ final class MenuBarSection {
         self.init(name: name, controlItem: controlItem, appState: appState)
     }
 
+    isolated deinit {
+        rehideMonitor?.stop()
+    }
+
     /// Shows the section.
     func show() {
         guard
@@ -141,24 +145,13 @@ final class MenuBarSection {
             return
         }
         switch name {
-        case .visible where useIceBar, .hidden where useIceBar:
-            Task {
-                if let screenForIceBar {
-                    await iceBarPanel?.show(section: .hidden, on: screenForIceBar)
-                }
-                for section in appState.menuBarManager.sections {
-                    section.controlItem.state = .hideItems
-                }
+        case _ where useIceBar:
+            guard let screenForIceBar, let iceBarPanel else { return }
+            for section in appState.menuBarManager.sections {
+                section.controlItem.state = .hideItems
             }
-        case .alwaysHidden where useIceBar:
-            Task {
-                if let screenForIceBar {
-                    await iceBarPanel?.show(section: .alwaysHidden, on: screenForIceBar)
-                }
-                for section in appState.menuBarManager.sections {
-                    section.controlItem.state = .hideItems
-                }
-            }
+            let section: Name = name == .alwaysHidden ? .alwaysHidden : .hidden
+            iceBarPanel.show(section: section, on: screenForIceBar)
         case .visible:
             iceBarPanel?.close()
             guard let hiddenSection = appState.menuBarManager.section(withName: .hidden) else {
@@ -185,11 +178,13 @@ final class MenuBarSection {
             hiddenSection.controlItem.state = .showItems
             visibleSection.controlItem.state = .showItems
         }
-        startRehideChecks()
+        appState.menuBarManager.section(withName: name == .visible ? .hidden : name)?.startRehideChecks()
     }
 
     /// Hides the section.
     func hide() {
+        stopRehideChecks()
+        appState?.menuBarManager.cancelPendingRehide()
         guard
             let appState,
             !isHidden
@@ -226,7 +221,9 @@ final class MenuBarSection {
             controlItem.state = .hideItems
         }
         appState.allowShowOnHover()
-        stopRehideChecks()
+        for section in appState.menuBarManager.sections where section.isHidden {
+            section.stopRehideChecks()
+        }
     }
 
     /// Toggles the visibility of the section.
@@ -238,64 +235,55 @@ final class MenuBarSection {
         }
     }
 
-    /// Starts running checks to determine when to rehide the section.
-    private func startRehideChecks() {
-        rehideTimer?.invalidate()
-        rehideMonitor?.stop()
-
-        guard
-            let appState,
-            appState.settingsManager.generalSettingsManager.autoRehide,
-            case .timed = appState.settingsManager.generalSettingsManager.rehideStrategy
-        else {
-            return
-        }
-
+    /// Starts a new timed-rehide session using the current settings.
+    func startRehideChecks() {
+        stopRehideChecks()
+        guard name != .visible, canRehide else { return }
+        // Panel preparation can take longer than the delay. Start its timer
+        // after presentation, including native status-item sessions on macOS 27.
+        if useIceBar, iceBarPanel?.isVisible != true { return }
         rehideMonitor = UniversalEventMonitor(mask: .mouseMoved) { [weak self] event in
-            guard
-                let self,
-                let screen = NSScreen.main
-            else {
-                return event
-            }
-            if NSEvent.mouseLocation.y < screen.visibleFrame.maxY {
-                if rehideTimer == nil {
-                    rehideTimer = .scheduledTimer(
-                        withTimeInterval: appState.settingsManager.generalSettingsManager.rehideInterval,
-                        repeats: false
-                    ) { [weak self] _ in
-                        guard
-                            let self,
-                            let screen = NSScreen.main
-                        else {
-                            return
-                        }
-                        if NSEvent.mouseLocation.y < screen.visibleFrame.maxY {
-                            Task {
-                                await self.hide()
-                            }
-                        } else {
-                            Task {
-                                await self.startRehideChecks()
-                            }
-                        }
-                    }
-                }
-            } else {
-                rehideTimer?.invalidate()
-                rehideTimer = nil
-            }
+            self?.updateRehideRequest()
             return event
         }
-
         rehideMonitor?.start()
+        updateRehideRequest()
     }
 
-    /// Stops running checks to determine when to rehide the section.
-    private func stopRehideChecks() {
-        rehideTimer?.invalidate()
+    private var canRehide: Bool {
+        guard let settings = appState?.settingsManager.generalSettingsManager else { return false }
+        return !isHidden && settings.autoRehide && settings.rehideStrategy == .timed
+    }
+
+    private func updateRehideRequest() {
+        guard canRehide, let appState else {
+            stopRehideChecks()
+            return
+        }
+        guard let screen = NSScreen.main, NSEvent.mouseLocation.y < screen.visibleFrame.maxY else {
+            rehideAction.cancel()
+            return
+        }
+        let interval = appState.settingsManager.generalSettingsManager.rehideInterval
+        guard interval.isFinite, interval >= 0 else {
+            rehideAction.cancel()
+            return
+        }
+        rehideAction.schedule(key: true, after: .seconds(interval)) { [weak self] in
+            guard let self, canRehide else {
+                self?.stopRehideChecks()
+                return
+            }
+            guard let screen = NSScreen.main, NSEvent.mouseLocation.y < screen.visibleFrame.maxY else { return }
+            Logger.menuBarSection.debug("Timed rehide reached its deadline")
+            hide()
+        }
+    }
+
+    /// Stops both pointer monitoring and any pending rehide action.
+    func stopRehideChecks() {
+        rehideAction.cancel()
         rehideMonitor?.stop()
-        rehideTimer = nil
         rehideMonitor = nil
     }
 }

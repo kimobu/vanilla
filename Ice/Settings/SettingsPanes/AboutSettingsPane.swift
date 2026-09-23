@@ -18,18 +18,17 @@ struct AboutSettingsPane: View {
         Bundle.main.url(forResource: "Acknowledgements", withExtension: "pdf")!
     }
 
-    private var contributeURL: URL {
+    private var repositoryURL: URL {
         // swiftlint:disable:next force_unwrapping
-        URL(string: "https://github.com/jordanbaird/Ice")!
+        URL(string: "https://github.com/kimobu/vanilla")!
     }
 
     private var issuesURL: URL {
-        contributeURL.appendingPathComponent("issues")
+        repositoryURL.appendingPathComponent("issues")
     }
 
-    private var donateURL: URL {
-        // swiftlint:disable:next force_unwrapping
-        URL(string: "https://icemenubar.app/Donate")!
+    private var releasesURL: URL {
+        repositoryURL.appendingPathComponent("releases")
     }
 
     private var lastUpdateCheckString: String {
@@ -70,17 +69,25 @@ struct AboutSettingsPane: View {
     private var appIconAndCopyrightSection: some View {
         IceSection(options: .plain) {
             HStack(spacing: 10) {
-                if let nsImage = NSImage(named: NSImage.applicationIconName) {
+                if
+                    let iconURL = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+                    let nsImage = NSImage(contentsOf: iconURL)
+                {
                     Image(nsImage: nsImage)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
-                        .frame(width: 225)
+                        .frame(width: 180)
+                        .accessibilityLabel("Vanilla app icon")
                 }
 
                 VStack(alignment: .leading) {
-                    Text("Ice")
-                        .font(.system(size: 72, weight: .medium))
+                    Text("Vanilla")
+                        .font(.system(size: 56, weight: .medium))
                         .foregroundStyle(.primary)
+
+                    Text("Based on Ice, created by Jordan Baird")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
 
                     Text("Version \(Constants.versionString)")
                         .font(.system(size: 18))
@@ -97,10 +104,14 @@ struct AboutSettingsPane: View {
     @ViewBuilder
     private var updatesSection: some View {
         IceSection(options: .hasDividers) {
-            automaticallyCheckForUpdates
-            automaticallyDownloadUpdates
-            if updatesManager.canCheckForUpdates {
-                checkForUpdates
+            if updatesManager.isConfigured {
+                automaticallyCheckForUpdates
+                automaticallyDownloadUpdates
+                if updatesManager.canCheckForUpdates {
+                    checkForUpdates
+                }
+            } else {
+                Link("View Vanilla Releases", destination: releasesURL)
             }
         }
         .frame(maxWidth: 600)
@@ -137,21 +148,18 @@ struct AboutSettingsPane: View {
     @ViewBuilder
     private var bottomBar: some View {
         HStack {
-            Button("Quit Ice") {
+            Button("Quit Vanilla") {
                 NSApp.terminate(nil)
             }
             Spacer()
             Button("Acknowledgements") {
                 NSWorkspace.shared.open(acknowledgementsURL)
             }
-            Button("Contribute") {
-                openURL(contributeURL)
+            Button("GitHub") {
+                openURL(repositoryURL)
             }
             Button("Report a Bug") {
                 openURL(issuesURL)
-            }
-            Button("Support Ice", systemImage: "heart.circle.fill") {
-                openURL(donateURL)
             }
         }
         .padding(8)

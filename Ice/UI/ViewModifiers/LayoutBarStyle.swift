@@ -11,24 +11,24 @@ extension View {
     /// - Note: The view this modifier is applied to must be transparent, or the style
     ///   will be drawn incorrectly.
     @ViewBuilder
-    func layoutBarStyle(appState: AppState, averageColorInfo: MenuBarAverageColorInfo?) -> some View {
+    func layoutBarStyle(appState: AppState, averageColorInfo: MenuBarAverageColorInfo?, usesSolidBackground: Bool = false) -> some View {
         background {
             if appState.isActiveSpaceFullscreen {
                 Color.black
             } else if let averageColorInfo {
                 switch averageColorInfo.source {
-                case .menuBarWindow:
+                case .menuBarWindow, .menuBarScreen:
                     Color(cgColor: averageColorInfo.color)
                         .overlay(
                             Material.bar
-                                .opacity(0.2)
+                                .opacity(usesSolidBackground ? 0 : 0.2)
                                 .blendMode(.softLight)
                         )
                 case .desktopWallpaper:
                     Color(cgColor: averageColorInfo.color)
                         .overlay(
                             Material.bar
-                                .opacity(0.5)
+                                .opacity(usesSolidBackground ? 0 : 0.5)
                                 .blendMode(.softLight)
                         )
                 }

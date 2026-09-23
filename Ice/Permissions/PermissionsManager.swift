@@ -3,6 +3,7 @@
 //  Ice
 //
 
+import AppKit
 import Combine
 import Foundation
 
@@ -10,14 +11,14 @@ import Foundation
 @MainActor
 final class PermissionsManager: ObservableObject {
     /// The state of the granted permissions for the app.
-    enum PermissionsState {
+    enum PermissionsState: Equatable {
         case missingPermissions
         case hasAllPermissions
         case hasRequiredPermissions
     }
 
     /// The state of the granted permissions for the app.
-    @Published var permissionsState = PermissionsState.missingPermissions
+    @Published private(set) var permissionsState = PermissionsState.missingPermissions
 
     let accessibilityPermission: AccessibilityPermission
 
@@ -42,6 +43,7 @@ final class PermissionsManager: ObservableObject {
             screenRecordingPermission,
         ]
         configureCancellables()
+        updatePermissionsState()
     }
 
     private func configureCancellables() {
@@ -51,17 +53,22 @@ final class PermissionsManager: ObservableObject {
             accessibilityPermission.$hasPermission.mapToVoid(),
             screenRecordingPermission.$hasPermission.mapToVoid()
         )
-        .receive(on: DispatchQueue.main)
         .sink { [weak self] in
-            guard let self else {
-                return
+            // Published emits before the stored value changes. Read the models afterward.
+            Task { @MainActor [weak self] in
+                self?.updatePermissionsState(permissionChanged: true)
             }
-            if allPermissions.allSatisfy({ $0.hasPermission }) {
-                permissionsState = .hasAllPermissions
-            } else if requiredPermissions.allSatisfy({ $0.hasPermission }) {
-                permissionsState = .hasRequiredPermissions
-            } else {
-                permissionsState = .missingPermissions
+        }
+        .store(in: &c)
+
+        Publishers.Merge3(
+            NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification),
+            NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification),
+            NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.sessionDidBecomeActiveNotification)
+        )
+        .sink { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.refreshPermissions()
             }
         }
         .store(in: &c)
@@ -69,7 +76,32 @@ final class PermissionsManager: ObservableObject {
         cancellables = c
     }
 
-    /// Stops running all permissions checks.
+    private func updatePermissionsState(permissionChanged: Bool = false) {
+        let state: PermissionsState
+        if allPermissions.allSatisfy({ $0.hasPermission }) {
+            state = .hasAllPermissions
+        } else if requiredPermissions.allSatisfy({ $0.hasPermission }) {
+            state = .hasRequiredPermissions
+        } else {
+            state = .missingPermissions
+        }
+        if permissionsState != state {
+            permissionsState = state
+        } else if permissionChanged {
+            // Settings reads individual permissions through this observable manager.
+            objectWillChange.send()
+        }
+    }
+
+    /// Refreshes both models without restarting their onboarding timers.
+    func refreshPermissions() {
+        for permission in allPermissions {
+            permission.refresh()
+        }
+        updatePermissionsState()
+    }
+
+    /// Stops onboarding polling. Activation and wake still recheck permission state.
     func stopAllChecks() {
         for permission in allPermissions {
             permission.stopCheck()

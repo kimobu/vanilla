@@ -231,6 +231,7 @@ final class LayoutBarContainer: NSView {
             }
             return .move
         case .updated:
+            sourceView.holdLayoutUpdates(in: self)
             if
                 sourceView.oldContainerInfo == nil,
                 let sourceIndex = arrangedViews.firstIndex(of: sourceView)

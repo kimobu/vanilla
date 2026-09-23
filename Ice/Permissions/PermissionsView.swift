@@ -74,7 +74,7 @@ struct PermissionsView: View {
     private var explanationView: some View {
         IceSection {
             VStack {
-                Text("Ice needs permission to manage the menu bar.")
+                Text("Vanilla needs permission to manage the menu bar.")
                 Text("Absolutely no personal information is collected or stored.")
                     .bold()
                     .foregroundStyle(.red)
@@ -139,7 +139,7 @@ struct PermissionsView: View {
                     .underline()
 
                 VStack(spacing: 0) {
-                    Text("Ice needs this to:")
+                    Text("Vanilla needs this to:")
                         .font(.title3)
                         .bold()
 
@@ -157,9 +157,7 @@ struct PermissionsView: View {
                     guard let appState = permissionsManager.appState else {
                         return
                     }
-                    permission.performRequest()
-                    Task {
-                        await permission.waitForPermission()
+                    permission.performRequest {
                         appState.activate(withPolicy: .regular)
                         openWindow(id: Constants.permissionsWindowID)
                     }
@@ -180,7 +178,7 @@ struct PermissionsView: View {
                             font: .callout.bold()
                         ) {
                             Label {
-                                Text("Ice can work in a limited mode without this permission.")
+                                Text("Vanilla can work in a limited mode without this permission.")
                             } icon: {
                                 Image(systemName: "checkmark.shield")
                                     .foregroundStyle(.green)

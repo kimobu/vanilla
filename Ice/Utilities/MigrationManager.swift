@@ -242,7 +242,7 @@ extension MigrationManager {
             }
 
             let alert = NSAlert()
-            alert.messageText = "Due to a bug in the 0.10.0 release, the data for Ice's menu bar items was corrupted and their positions had to be reset."
+            alert.messageText = "Due to a bug in the 0.10.0 release, the data for Vanilla's menu bar items was corrupted and their positions had to be reset."
             alert.informativeText = "Our sincerest apologies for the inconvenience."
 
             return .successButShowAlert(alert)
@@ -331,7 +331,7 @@ extension MigrationManager {
         }
         let object = try JSONSerialization.jsonObject(with: data)
         guard let array = object as? [[String: Any]] else {
-            throw MigrationError.invalidMenuBarSectionsJSONObject(object)
+            throw MigrationError.invalidMenuBarSectionsJSONObject
         }
         return array
     }
@@ -351,7 +351,7 @@ extension MigrationManager {
 
 extension MigrationManager {
     enum MigrationError: Error, CustomStringConvertible {
-        case invalidMenuBarSectionsJSONObject(Any)
+        case invalidMenuBarSectionsJSONObject
         case hotkeyMigrationError(any Error)
         case controlItemMigrationError(any Error)
         case appearanceConfigurationMigrationError(AppearanceConfigurationMigrationError)
@@ -359,8 +359,8 @@ extension MigrationManager {
 
         var description: String {
             switch self {
-            case .invalidMenuBarSectionsJSONObject(let object):
-                "Invalid menu bar sections JSON object: \(object)"
+            case .invalidMenuBarSectionsJSONObject:
+                "Invalid menu bar sections JSON object"
             case .hotkeyMigrationError(let error):
                 "Error migrating hotkeys: \(error)"
             case .controlItemMigrationError(let error):

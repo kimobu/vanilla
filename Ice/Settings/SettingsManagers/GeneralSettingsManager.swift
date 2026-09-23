@@ -106,7 +106,7 @@ final class GeneralSettingsManager: ObservableObject {
             do {
                 iceIcon = try decoder.decode(ControlItemImageSet.self, from: data)
             } catch {
-                Logger.generalSettingsManager.error("Error decoding Ice icon: \(error)")
+                Logger.generalSettingsManager.error("Error decoding Vanilla icon: \(error)")
             }
             if case .custom = iceIcon.name {
                 lastCustomIceIcon = iceIcon
@@ -137,7 +137,7 @@ final class GeneralSettingsManager: ObservableObject {
                     let data = try encoder.encode(iceIcon)
                     Defaults.set(data, forKey: .iceIcon)
                 } catch {
-                    Logger.generalSettingsManager.error("Error encoding Ice icon: \(error)")
+                    Logger.generalSettingsManager.error("Error encoding Vanilla icon: \(error)")
                 }
             }
             .store(in: &c)
@@ -186,9 +186,8 @@ final class GeneralSettingsManager: ObservableObject {
 
         $itemSpacingOffset
             .receive(on: DispatchQueue.main)
-            .sink { [weak appState] offset in
+            .sink { offset in
                 Defaults.set(offset, forKey: .itemSpacingOffset)
-                appState?.spacingManager.offset = Int(offset)
             }
             .store(in: &c)
 

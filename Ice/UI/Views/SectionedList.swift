@@ -53,15 +53,9 @@ struct SectionedList<ItemID: Hashable>: View {
     }
 
     var body: some View {
-        if #available(macOS 15.0, *) {
-            scrollView
-                .contentMargins(.all, contentPadding, for: .scrollContent)
-                .contentMargins(.all, -0.5, for: .scrollIndicators)
-        } else {
-            scrollView
-                .contentMargins(.all, contentPadding, for: .scrollContent)
-                .contentMargins(.all, -contentPadding, for: .scrollIndicators)
-        }
+        scrollView
+            .contentMargins(.all, contentPadding, for: .scrollContent)
+            .contentMargins(.all, -0.5, for: .scrollIndicators)
     }
 
     @ViewBuilder

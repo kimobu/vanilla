@@ -144,6 +144,9 @@ extension CGImage {
             }
         }
 
+        // A fully transparent sample has no color to average.
+        guard includedPixelCount > 0 else { return nil }
+
         // Multiply the included pixel count by 255 to convert the components
         // to their corresponding floating point values.
         let adjustedPixelCount = CGFloat(includedPixelCount * 255)
@@ -464,6 +467,7 @@ extension NSScreen {
 
 extension NSStatusItem {
     /// Shows the given menu under the status item.
+    @MainActor
     func showMenu(_ menu: NSMenu) {
         let originalMenu = self.menu
         defer {

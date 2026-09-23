@@ -111,15 +111,15 @@ struct GeneralSettingsPane: View {
 
     @ViewBuilder
     private var iceIconOptions: some View {
-        Toggle("Show Ice icon", isOn: manager.bindings.showIceIcon)
+        Toggle("Show Vanilla icon", isOn: manager.bindings.showIceIcon)
             .annotation {
                 if !manager.showIceIcon {
-                    Text("You can still access Ice's settings by right-clicking an empty area in the menu bar")
+                    Text("You can still access Vanilla's settings by right-clicking an empty area in the menu bar")
                 }
             }
         if manager.showIceIcon {
-            IceMenu("Ice icon") {
-                Picker("Ice icon", selection: manager.bindings.iceIcon) {
+            IceMenu("Vanilla icon") {
+                Picker("Vanilla icon", selection: manager.bindings.iceIcon) {
                     ForEach(ControlItemImageSet.userSelectableIceIcons) { imageSet in
                         Button {
                             manager.iceIcon = imageSet
@@ -183,7 +183,7 @@ struct GeneralSettingsPane: View {
 
     @ViewBuilder
     private var useIceBar: some View {
-        Toggle("Use Ice Bar", isOn: manager.bindings.useIceBar)
+        Toggle("Use Vanilla Bar", isOn: manager.bindings.useIceBar)
             .annotation("Show hidden menu bar items in a separate bar below the menu bar")
     }
 
@@ -197,11 +197,11 @@ struct GeneralSettingsPane: View {
         .annotation {
             switch manager.iceBarLocation {
             case .dynamic:
-                Text("The Ice Bar's location changes based on context")
+                Text("The Vanilla Bar's location changes based on context")
             case .mousePointer:
-                Text("The Ice Bar is centered below the mouse pointer")
+                Text("The Vanilla Bar is centered below the mouse pointer")
             case .iceIcon:
-                Text("The Ice Bar is centered below the Ice icon")
+                Text("The Vanilla Bar is centered below the Vanilla icon")
             }
         }
     }
@@ -229,6 +229,7 @@ struct GeneralSettingsPane: View {
         IceLabeledContent {
             IceSlider(
                 localizedOffsetString(for: tempItemSpacingOffset),
+                accessibilityLabel: "Menu bar item spacing",
                 value: $tempItemSpacingOffset,
                 in: -16...16,
                 step: 2
@@ -311,6 +312,7 @@ struct GeneralSettingsPane: View {
                     rehideStrategyPicker
                     IceSlider(
                         rehideIntervalKey,
+                        accessibilityLabel: "Automatically rehide after, seconds",
                         value: manager.bindings.rehideInterval,
                         in: 0...30,
                         step: 1
@@ -325,10 +327,10 @@ struct GeneralSettingsPane: View {
     /// Apply menu bar spacing offset.
     private func applyOffset() {
         isApplyingOffset = true
-        manager.itemSpacingOffset = tempItemSpacingOffset
+        let offset = Int(tempItemSpacingOffset)
         Task {
             do {
-                try await appState.spacingManager.applyOffset()
+                try await appState.spacingManager.applyOffset(offset, using: appState)
             } catch {
                 let alert = NSAlert(error: error)
                 alert.runModal()
@@ -340,7 +342,6 @@ struct GeneralSettingsPane: View {
     /// Reset menu bar spacing offset to default.
     private func resetOffsetToDefault() {
         tempItemSpacingOffset = 0
-        manager.itemSpacingOffset = tempItemSpacingOffset
         applyOffset()
     }
 }

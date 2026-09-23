@@ -51,14 +51,20 @@ extension Task where Failure == any Error {
         }
     }
 
-    private static func run<C: Clock>(
+    static func run<C: Clock>(
         operation: @escaping @Sendable () async throws -> Success,
         withTimeout timeout: C.Instant.Duration,
         tolerance: C.Instant.Duration?,
         clock: C
     ) async throws -> Success {
         try await withThrowingTaskGroup(of: Success.self) { group in
-            group.addTask(operation: operation)
+            group.addTask {
+                // addTask still starts cancelled children. Do not begin an
+                // overlay update or movement wait that its owner already cancelled.
+                // https://developer.apple.com/documentation/swift/throwingtaskgroup
+                try _Concurrency.Task.checkCancellation()
+                return try await operation()
+            }
             group.addTask {
                 try await _Concurrency.Task.sleep(for: timeout, tolerance: tolerance, clock: clock)
                 throw TaskTimeoutError()

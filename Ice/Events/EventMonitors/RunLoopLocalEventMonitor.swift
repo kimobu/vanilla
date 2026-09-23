@@ -6,11 +6,15 @@
 import Cocoa
 import Combine
 
+@MainActor
 final class RunLoopLocalEventMonitor {
-    private let runLoop = CFRunLoopGetCurrent()
+    private let runLoop = CFRunLoopGetMain()
     private let mode: RunLoop.Mode
-    private let handler: (NSEvent) -> NSEvent?
-    private let observer: CFRunLoopObserver
+    private let mask: NSEvent.EventTypeMask
+    private let handler: @MainActor (NSEvent) -> Void
+    private var observer: CFRunLoopObserver?
+    private var isProcessing = false
+    private var lastEvent: NSEvent?
 
     /// Creates an event monitor with the given event type mask and handler.
     ///
@@ -21,45 +25,56 @@ final class RunLoopLocalEventMonitor {
     init(
         mask: NSEvent.EventTypeMask,
         mode: RunLoop.Mode,
-        handler: @escaping (_ event: NSEvent) -> NSEvent?
+        handler: @MainActor @escaping (_ event: NSEvent) -> Void
     ) {
         self.mode = mode
+        self.mask = mask
         self.handler = handler
         self.observer = CFRunLoopObserverCreateWithHandler(
             kCFAllocatorDefault,
             CFRunLoopActivity.beforeSources.rawValue,
             true,
             0
-        ) { _, _ in
-            var events = [NSEvent]()
-
-            while let event = NSApp.nextEvent(matching: .any, until: nil, inMode: .default, dequeue: true) {
-                events.append(event)
-            }
-
-            for event in events {
-                var handledEvent: NSEvent?
-
-                if !mask.contains(NSEvent.EventTypeMask(rawValue: 1 << event.type.rawValue)) {
-                    handledEvent = event
-                } else if let eventFromHandler = handler(event) {
-                    handledEvent = eventFromHandler
-                }
-
-                guard let handledEvent else {
-                    continue
-                }
-
-                NSApp.postEvent(handledEvent, atStart: false)
+        ) { [weak self] _, _ in
+            // This observer is installed only on the main run loop.
+            MainActor.assumeIsolated {
+                self?.processPendingEvent()
             }
         }
     }
 
-    deinit {
+    /// Observes a pending event without changing AppKit's queue or its order.
+    /// Draining and reposting here can keep a tracking loop awake indefinitely.
+    /// See docs/audits/2026-09-20-hotkey-recorder.txt for the captured stack.
+    /// https://developer.apple.com/documentation/appkit/nsapplication/nextevent(matching:until:inmode:dequeue:)
+    func processPendingEvent() {
+        guard !isProcessing else { return }
+        isProcessing = true
+        defer { isProcessing = false }
+        guard let event = NSApp.nextEvent(matching: mask, until: .distantPast, inMode: mode, dequeue: false) else {
+            lastEvent = nil
+            return
+        }
+        // AppKit can return a new NSEvent wrapper for every peek. Compare the
+        // event values so another run-loop pass does not publish it again.
+        if let lastEvent,
+            event.type == lastEvent.type,
+            event.timestamp == lastEvent.timestamp,
+            event.windowNumber == lastEvent.windowNumber,
+            event.modifierFlags == lastEvent.modifierFlags,
+            event.locationInWindow == lastEvent.locationInWindow {
+            return
+        }
+        lastEvent = event
+        handler(event)
+    }
+
+    isolated deinit {
         stop()
     }
 
     func start() {
+        guard let observer else { return }
         CFRunLoopAddObserver(
             runLoop,
             observer,
@@ -68,6 +83,8 @@ final class RunLoopLocalEventMonitor {
     }
 
     func stop() {
+        lastEvent = nil
+        guard let observer else { return }
         CFRunLoopRemoveObserver(
             runLoop,
             observer,
@@ -78,7 +95,8 @@ final class RunLoopLocalEventMonitor {
 
 extension RunLoopLocalEventMonitor {
     /// A publisher that emits local events for an event type mask.
-    struct RunLoopLocalEventPublisher: Publisher {
+    @MainActor
+    struct RunLoopLocalEventPublisher: @MainActor Publisher {
         typealias Output = NSEvent
         typealias Failure = Never
 
@@ -100,7 +118,8 @@ extension RunLoopLocalEventMonitor {
 }
 
 extension RunLoopLocalEventMonitor.RunLoopLocalEventPublisher {
-    private final class RunLoopLocalEventSubscription<S: Subscriber<Output, Failure>>: Subscription {
+    @MainActor
+    private final class RunLoopLocalEventSubscription<S: Subscriber<Output, Failure>>: @MainActor Subscription {
         var subscriber: S?
         let monitor: RunLoopLocalEventMonitor
 
@@ -108,7 +127,6 @@ extension RunLoopLocalEventMonitor.RunLoopLocalEventPublisher {
             self.subscriber = subscriber
             self.monitor = RunLoopLocalEventMonitor(mask: mask, mode: mode) { event in
                 _ = subscriber.receive(event)
-                return event
             }
             monitor.start()
         }

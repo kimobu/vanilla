@@ -3,10 +3,8 @@
 //  Ice
 //
 
-import AXSwift
 import Combine
 import Cocoa
-import ScreenCaptureKit
 
 // MARK: - Permission
 
@@ -33,8 +31,8 @@ class Permission: ObservableObject, Identifiable {
 
     /// Observer that runs on a timer to check permissions.
     private var timerCancellable: AnyCancellable?
-    /// Observer that observes the ``hasPermission`` property.
-    private var hasPermissionCancellable: AnyCancellable?
+    /// One pending UI action, replaced if the user requests the permission again.
+    private var onGranted: (() -> Void)?
 
     /// Creates a permission.
     ///
@@ -72,87 +70,37 @@ class Permission: ObservableObject, Identifiable {
                 guard let self else {
                     return
                 }
-                hasPermission = check()
+                refresh()
             }
     }
 
-    /// Performs the request and opens the System Settings app to the appropriate pane.
-    func performRequest() {
+    /// Rechecks permission and delivers a pending action exactly once after a grant.
+    func refresh() {
+        let granted = check()
+        if hasPermission != granted {
+            hasPermission = granted
+        }
+        guard hasPermission, let action = onGranted else { return }
+        onGranted = nil
+        action()
+    }
+
+    /// Requests permission and invokes the action after the system reports a grant.
+    /// There is no suspended task to retain when the permissions window closes.
+    func performRequest(onGranted: @escaping () -> Void = {}) {
+        self.onGranted = onGranted
+        configureCancellables()
+        guard !hasPermission else { return }
         request()
         if let settingsURL {
             NSWorkspace.shared.open(settingsURL)
         }
     }
 
-    /// Asynchronously waits for the app to be granted this permission.
-    func waitForPermission() async {
-        configureCancellables()
-        guard !hasPermission else {
-            return
-        }
-        return await withCheckedContinuation { continuation in
-            hasPermissionCancellable = $hasPermission.sink { [weak self] hasPermission in
-                guard let self else {
-                    continuation.resume()
-                    return
-                }
-                if hasPermission {
-                    hasPermissionCancellable?.cancel()
-                    continuation.resume()
-                }
-            }
-        }
-    }
-
-    /// Stops running the permission check.
+    /// Stops checking permissions and discards any pending UI action.
     func stopCheck() {
         timerCancellable?.cancel()
         timerCancellable = nil
-        hasPermissionCancellable?.cancel()
-        hasPermissionCancellable = nil
-    }
-}
-
-// MARK: - AccessibilityPermission
-
-final class AccessibilityPermission: Permission {
-    init() {
-        super.init(
-            title: "Accessibility",
-            details: [
-                "Get real-time information about the menu bar.",
-                "Arrange menu bar items.",
-            ],
-            isRequired: true,
-            settingsURL: nil,
-            check: {
-                checkIsProcessTrusted()
-            },
-            request: {
-                checkIsProcessTrusted(prompt: true)
-            }
-        )
-    }
-}
-
-// MARK: - ScreenRecordingPermission
-
-final class ScreenRecordingPermission: Permission {
-    init() {
-        super.init(
-            title: "Screen Recording",
-            details: [
-                "Edit the menu bar's appearance.",
-                "Display images of individual menu bar items.",
-            ],
-            isRequired: false,
-            settingsURL: URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
-            check: {
-                ScreenCapture.checkPermissions()
-            },
-            request: {
-                ScreenCapture.requestPermissions()
-            }
-        )
+        onGranted = nil
     }
 }

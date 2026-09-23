@@ -25,8 +25,20 @@ final class MenuBarOverlayPanel: NSPanel {
     }
 
     /// A context that manages panel update tasks.
+    @MainActor
     private final class UpdateTaskContext {
-        private var tasks = [UpdateFlag: Task<Void, any Error>]()
+        private var tasks = [UpdateFlag: Task<Void, Never>]()
+
+        isolated deinit {
+            cancelAll()
+        }
+
+        func cancelAll() {
+            for task in tasks.values {
+                task.cancel()
+            }
+            tasks.removeAll()
+        }
 
         /// Sets the task for the given update flag.
         ///
@@ -36,10 +48,19 @@ final class MenuBarOverlayPanel: NSPanel {
         ///   - flag: The update flag to set the task for.
         ///   - timeout: The timeout of the task.
         ///   - operation: The operation for the task to perform.
-        func setTask(for flag: UpdateFlag, timeout: Duration, operation: @escaping () async throws -> Void) {
+        func setTask(for flag: UpdateFlag, timeout: Duration, operation: @MainActor @Sendable @escaping () async throws -> Void) {
             cancelTask(for: flag)
-            tasks[flag] = Task.detached(timeout: timeout) {
-                try await operation()
+            tasks[flag] = Task {
+                do {
+                    try await Task<Void, any Error>.run(operation: operation, withTimeout: timeout, tolerance: nil, clock: ContinuousClock())
+                } catch is CancellationError {
+                    return
+                } catch is TaskTimeoutError {
+                    // Repeated observation intentionally ends at its deadline.
+                    return
+                } catch {
+                    Logger.overlayPanel.error("Overlay update failed: \(error)")
+                }
             }
         }
 
@@ -71,6 +92,8 @@ final class MenuBarOverlayPanel: NSPanel {
 
     /// The context that manages panel update tasks.
     private let updateTaskContext = UpdateTaskContext()
+    private let flagResetTask = CoalescingTask()
+    private var screenCheckTask: Task<Void, Never>?
 
     /// The shared app state.
     private(set) weak var appState: AppState?
@@ -92,10 +115,23 @@ final class MenuBarOverlayPanel: NSPanel {
         self.title = "Menu Bar Overlay"
         self.backgroundColor = .clear
         self.hasShadow = false
+        self.isReleasedWhenClosed = false
         self.ignoresMouseEvents = true
         self.collectionBehavior = [.fullScreenNone, .ignoresCycle, .moveToActiveSpace]
         self.contentView = MenuBarOverlayPanelContentView()
         configureCancellables()
+    }
+
+    override func close() {
+        updateTaskContext.cancelAll()
+        flagResetTask.cancel()
+        wallpaperTask?.cancel()
+        screenCheckTask?.cancel()
+        wallpaperTask = nil
+        screenCheckTask = nil
+        cancellables.removeAll()
+        contentView = nil
+        super.close()
     }
 
     private func configureCancellables() {
@@ -118,9 +154,10 @@ final class MenuBarOverlayPanel: NSPanel {
                 guard let self else {
                     return
                 }
-                updateTaskContext.setTask(for: .desktopWallpaper, timeout: .seconds(5)) {
+                updateTaskContext.setTask(for: .desktopWallpaper, timeout: .seconds(5)) { [weak self] in
                     while true {
                         try Task.checkCancellation()
+                        guard let self else { return }
                         self.insertUpdateFlag(.desktopWallpaper)
                         try await Task.sleep(for: .seconds(1))
                     }
@@ -165,8 +202,14 @@ final class MenuBarOverlayPanel: NSPanel {
                     hasDoneInitialUpdate = true
                 }
             }
-            Task {
-                try? await Task.sleep(for: .milliseconds(100))
+            screenCheckTask?.cancel()
+            screenCheckTask = Task { [weak self] in
+                do {
+                    try await Task.sleep(for: .milliseconds(100))
+                } catch {
+                    return
+                }
+                guard let self else { return }
                 if self.owningScreen != NSScreen.main {
                     self.updateTaskContext.cancelTask(for: .applicationMenuFrame)
                 }
@@ -223,9 +266,9 @@ final class MenuBarOverlayPanel: NSPanel {
                 guard let self, !flags.isEmpty else {
                     return
                 }
-                Task {
+                flagResetTask.schedule { [weak self] in
                     // Must be run async, or this will not remove the flags.
-                    self.updateFlags.removeAll()
+                    self?.updateFlags.removeAll()
                 }
                 let windows = WindowInfo.getOnScreenWindows()
                 guard let owningDisplay = self.validate(for: .updates, with: windows) else {
@@ -291,6 +334,8 @@ final class MenuBarOverlayPanel: NSPanel {
 
     /// Stores the area of the desktop wallpaper that is under the menu bar
     /// of the given display.
+    private var wallpaperTask: Task<Void, Never>?
+
     private func updateDesktopWallpaper(for display: CGDirectDisplayID, with windows: [WindowInfo]) {
         guard
             let wallpaperWindow = WindowInfo.getWallpaperWindow(from: windows, for: display),
@@ -298,9 +343,13 @@ final class MenuBarOverlayPanel: NSPanel {
         else {
             return
         }
-        let wallpaper = ScreenCapture.captureWindow(wallpaperWindow.windowID, screenBounds: menuBarWindow.frame)
-        if desktopWallpaper?.dataProvider?.data != wallpaper?.dataProvider?.data {
-            desktopWallpaper = wallpaper
+        wallpaperTask?.cancel()
+        wallpaperTask = Task { [weak self] in
+            let wallpaper = await ScreenCapture.captureWindow(wallpaperWindow.windowID, screenBounds: menuBarWindow.frame)
+            guard !Task.isCancelled, let self else { return }
+            if desktopWallpaper?.dataProvider?.data != wallpaper?.dataProvider?.data {
+                desktopWallpaper = wallpaper
+            }
         }
     }
 
@@ -386,11 +435,13 @@ private final class MenuBarOverlayPanelContentView: NSView {
             if let appState = overlayPanel.appState {
                 appState.appearanceManager.$configuration
                     .removeDuplicates()
-                    .assign(to: &$fullConfiguration)
+                    .sink { [weak self] in self?.fullConfiguration = $0 }
+                    .store(in: &c)
 
                 appState.appearanceManager.$previewConfiguration
                     .removeDuplicates()
-                    .assign(to: &$previewConfiguration)
+                    .sink { [weak self] in self?.previewConfiguration = $0 }
+                    .store(in: &c)
 
                 for section in appState.menuBarManager.sections {
                     // Redraw whenever the window frame of a control item changes.
@@ -570,7 +621,7 @@ private final class MenuBarOverlayPanelContentView: NSView {
             return CGRect(x: rect.minX, y: rect.minY, width: maxX, height: rect.height)
         }()
         let trailingPathBounds: CGRect = {
-            let items = MenuBarItem.getMenuBarItems(on: screen.displayID, onScreenOnly: true, activeSpaceOnly: false)
+            let items = overlayPanel?.appState?.itemManager.menuBarItems(on: screen.displayID, onScreenOnly: true, activeSpaceOnly: false) ?? []
             guard !items.isEmpty else {
                 return .zero
             }

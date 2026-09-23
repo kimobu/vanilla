@@ -8,8 +8,6 @@ import SwiftUI
 
 @MainActor
 final class HotkeyRecorderModel: ObservableObject {
-    @EnvironmentObject private var appState: AppState
-
     @Published private(set) var isRecording = false
 
     @Published var isPresentingReservedByMacOSError = false
@@ -29,6 +27,10 @@ final class HotkeyRecorderModel: ObservableObject {
     init(hotkey: Hotkey) {
         self.hotkey = hotkey
         configureCancellables()
+    }
+
+    isolated deinit {
+        stopRecording()
     }
 
     private func configureCancellables() {

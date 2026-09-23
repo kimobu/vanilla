@@ -13,20 +13,21 @@ final class LayoutBarItemView: NSView {
     private weak var appState: AppState?
 
     private var cancellables = Set<AnyCancellable>()
+    private let dragContainers = NSHashTable<LayoutBarContainer>.weakObjects()
+    private var isDragging = false
 
     /// The item that the view represents.
     let item: MenuBarItem
 
-    /// Temporary information that the item view retains when it is moved outside
-    /// of a layout view.
-    ///
-    /// When the item view is dragged outside of a layout view, this property is set
-    /// to hold the layout view's container view, as well as the index of the item
-    /// view in relation to the container's other items. Upon being inserted into a
-    /// new layout view, these values are removed. If the item is dropped outside of
-    /// a layout view, these values are used to reinsert the item view in its original
-    /// layout view.
+    /// The original row and index, retained until the dragging session ends.
+    /// Other rows use this to distinguish insertion from movement within a row.
     var oldContainerInfo: (container: LayoutBarContainer, index: Int)?
+
+    /// Cache updates must not replace a placeholder in any row visited by this drag.
+    func holdLayoutUpdates(in container: LayoutBarContainer) {
+        container.canSetArrangedViews = false
+        dragContainers.add(container)
+    }
 
     /// A Boolean value that indicates whether the item view is currently inside a container.
     var hasContainer = false
@@ -34,15 +35,8 @@ final class LayoutBarItemView: NSView {
     /// The image displayed inside the view.
     private var image: NSImage? {
         didSet {
-            if
-                let image,
-                let screen = appState?.imageCache.screen
-            {
-                let size = CGSize(
-                    width: image.size.width / screen.backingScaleFactor,
-                    height: image.size.height / screen.backingScaleFactor
-                )
-                setFrameSize(size)
+            if let image {
+                setFrameSize(image.size)
             } else {
                 setFrameSize(.zero)
             }
@@ -77,6 +71,9 @@ final class LayoutBarItemView: NSView {
 
         self.toolTip = item.displayName
         self.isEnabled = item.isMovable
+        setAccessibilityElement(true)
+        setAccessibilityRole(.image)
+        setAccessibilityLabel(item.displayName)
 
         configureCancellables()
     }
@@ -84,6 +81,54 @@ final class LayoutBarItemView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
+    }
+
+    override func accessibilityCustomActions() -> [NSAccessibilityCustomAction]? {
+        guard
+            isEnabled,
+            let container = superview as? LayoutBarContainer,
+            container.canSetArrangedViews,
+            let index = container.arrangedViews.firstIndex(of: self)
+        else { return nil }
+        var actions = [NSAccessibilityCustomAction]()
+        if index > 0, container.arrangedViews[index - 1].isEnabled {
+            actions.append(NSAccessibilityCustomAction(name: "Move Left", target: self, selector: #selector(accessibilityMoveLeft(_:))))
+        }
+        if index + 1 < container.arrangedViews.count, container.arrangedViews[index + 1].isEnabled {
+            actions.append(NSAccessibilityCustomAction(name: "Move Right", target: self, selector: #selector(accessibilityMoveRight(_:))))
+        }
+        if let appState {
+            for section in appState.menuBarManager.sections where section.isEnabled && section.name != container.section.name {
+                guard section.name == .visible || item.canBeHidden else { continue }
+                let selector = switch section.name {
+                case .visible: #selector(accessibilityMoveToVisible(_:))
+                case .hidden: #selector(accessibilityMoveToHidden(_:))
+                case .alwaysHidden: #selector(accessibilityMoveToAlwaysHidden(_:))
+                }
+                actions.append(NSAccessibilityCustomAction(name: "Move to \(section.name.displayString)", target: self, selector: selector))
+            }
+        }
+        return actions
+    }
+
+    @objc private func accessibilityMoveToVisible(_ action: NSAccessibilityCustomAction) -> Bool {
+        (superview?.superview as? LayoutBarPaddingView)?.moveToSection(self, name: .visible) ?? false
+    }
+
+    @objc private func accessibilityMoveToHidden(_ action: NSAccessibilityCustomAction) -> Bool {
+        (superview?.superview as? LayoutBarPaddingView)?.moveToSection(self, name: .hidden) ?? false
+    }
+
+    @objc private func accessibilityMoveToAlwaysHidden(_ action: NSAccessibilityCustomAction) -> Bool {
+        (superview?.superview as? LayoutBarPaddingView)?.moveToSection(self, name: .alwaysHidden) ?? false
+    }
+
+    @objc private func accessibilityMoveLeft(_ action: NSAccessibilityCustomAction) -> Bool {
+        (superview?.superview as? LayoutBarPaddingView)?.moveAdjacent(self, offset: -1) ?? false
+    }
+
+    @objc private func accessibilityMoveRight(_ action: NSAccessibilityCustomAction) -> Bool {
+        (superview?.superview as? LayoutBarPaddingView)?.moveAdjacent(self, offset: 1) ?? false
     }
 
     private func configureCancellables() {
@@ -94,11 +139,11 @@ final class LayoutBarItemView: NSView {
                 .sink { [weak self] images in
                     guard
                         let self,
-                        let cgImage = images[item.info]
+                        let capture = images[item.info]
                     else {
                         return
                     }
-                    image = NSImage(cgImage: cgImage, size: CGSize(width: cgImage.width, height: cgImage.height))
+                    image = capture.nsImage
                 }
                 .store(in: &c)
         }
@@ -184,24 +229,39 @@ extension LayoutBarItemView: NSDraggingSource {
     }
 
     func draggingSession(_ session: NSDraggingSession, willBeginAt screenPoint: NSPoint) {
+        isDragging = true
         // make sure the container doesn't update its arranged views and that items
         // aren't arranged during a dragging session
         if let container = superview as? LayoutBarContainer {
-            container.canSetArrangedViews = false
+            holdLayoutUpdates(in: container)
+            if let index = container.arrangedViews.firstIndex(of: self) {
+                oldContainerInfo = (container, index)
+            }
         }
 
         // prevent the dragging image from animating back to its original location
         session.animatesToStartingPositionsOnCancelOrFail = false
 
         // async to prevent the view from disappearing before the dragging image appears
-        DispatchQueue.main.async {
-            self.isDraggingPlaceholder = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self, isDragging else { return }
+            isDraggingPlaceholder = true
         }
     }
 
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        isDragging = false
         defer {
-            // always remove container info at the end of a session
+            // Restore every visited row, including one left before cancellation.
+            for container in dragContainers.allObjects {
+                container.canSetArrangedViews = true
+                if operation.isEmpty {
+                    // Use current model state, which also excludes a publisher
+                    // that exited while its image was being dragged.
+                    container.setArrangedViews(items: appState?.itemManager.itemCache.managedItems(for: container.section.name))
+                }
+            }
+            dragContainers.removeAllObjects()
             oldContainerInfo = nil
         }
 
@@ -212,19 +272,20 @@ extension LayoutBarItemView: NSDraggingSource {
         // need to be updated inside `performDragOperation(_:)` on `LayoutBarPaddingView`
         isDraggingPlaceholder = false
 
-        // if the drop occurs outside of a container, reinsert the view into its original
-        // container at its original index
-        if !hasContainer {
+        // A successful drop without an attached destination retains the original
+        // view until the resulting model update arrives. Cancellation instead
+        // reconciles every visited row with the current cache in the defer above.
+        if !hasContainer && !operation.isEmpty {
             guard let (container, index) = oldContainerInfo else {
                 return
             }
             container.shouldAnimateNextLayoutPass = false
-            container.arrangedViews.insert(self, at: index)
+            container.arrangedViews.insert(self, at: min(index, container.arrangedViews.count))
         }
     }
 }
 
-extension LayoutBarItemView: NSAccessibilityLayoutItem { }
+extension LayoutBarItemView: @MainActor NSAccessibilityLayoutItem { }
 
 // MARK: Layout Bar Item Pasteboard Type
 extension NSPasteboard.PasteboardType {

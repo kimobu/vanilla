@@ -7,11 +7,12 @@ import Combine
 import SwiftUI
 
 struct CustomColorPicker: NSViewRepresentable {
-    final class Coordinator {
+    @MainActor
+    final class Coordinator: NSObject {
         @Binding var selection: CGColor
 
-        let supportsOpacity: Bool
-        let mode: NSColorPanel.Mode
+        var supportsOpacity: Bool
+        var mode: NSColorPanel.Mode
 
         private var cancellables = Set<AnyCancellable>()
 
@@ -23,22 +24,28 @@ struct CustomColorPicker: NSViewRepresentable {
             self._selection = selection
             self.supportsOpacity = supportsOpacity
             self.mode = mode
+            super.init()
+        }
+
+        @objc private func colorDidChange(_ sender: NSColorWell) {
+            if selection != sender.color.cgColor {
+                selection = sender.color.cgColor
+            }
+        }
+
+        func update(selection: Binding<CGColor>, supportsOpacity: Bool, mode: NSColorPanel.Mode) {
+            self._selection = selection
+            self.supportsOpacity = supportsOpacity
+            self.mode = mode
         }
 
         func configure(with nsView: NSColorWell) {
             var c = Set<AnyCancellable>()
 
-            nsView
-                .publisher(for: \.color)
-                .removeDuplicates()
-                .sink { [weak self] color in
-                    DispatchQueue.main.async {
-                        if self?.selection != color.cgColor {
-                            self?.selection = color.cgColor
-                        }
-                    }
-                }
-                .store(in: &c)
+            // Only user edits send an action. A SwiftUI update that assigns the
+            // well's color must not enqueue a write back into an older binding.
+            nsView.target = self
+            nsView.action = #selector(colorDidChange(_:))
 
             NSColorPanel.shared
                 .publisher(for: \.isVisible)
@@ -79,8 +86,16 @@ struct CustomColorPicker: NSViewRepresentable {
 
             cancellables = c
         }
+
+        func tearDown(_ nsView: NSColorWell) {
+            cancellables.removeAll()
+            nsView.target = nil
+            nsView.action = nil
+            if nsView.isActive { nsView.deactivate() }
+        }
     }
 
+    let label: String
     @Binding var selection: CGColor
 
     let supportsOpacity: Bool
@@ -88,15 +103,22 @@ struct CustomColorPicker: NSViewRepresentable {
 
     func makeNSView(context: Context) -> NSColorWell {
         let nsView = NSColorWell()
+        nsView.setAccessibilityLabel(label)
         context.coordinator.configure(with: nsView)
         return nsView
     }
 
     func updateNSView(_ nsView: NSColorWell, context: Context) {
+        nsView.setAccessibilityLabel(label)
+        context.coordinator.update(selection: $selection, supportsOpacity: supportsOpacity, mode: mode)
         if let color = NSColor(cgColor: selection) {
             nsView.color = color
         }
         nsView.supportsAlpha = supportsOpacity
+    }
+
+    static func dismantleNSView(_ nsView: NSColorWell, coordinator: Coordinator) {
+        coordinator.tearDown(nsView)
     }
 
     func makeCoordinator() -> Coordinator {
@@ -113,6 +135,8 @@ struct CustomColorPicker: NSViewRepresentable {
         context: Context
     ) -> CGSize? {
         switch nsView.controlSize {
+        case .extraLarge:
+            nsView.intrinsicContentSize
         case .large:
             CGSize(width: 55, height: 30)
         case .regular:

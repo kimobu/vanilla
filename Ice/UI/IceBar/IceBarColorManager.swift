@@ -6,18 +6,42 @@
 import Cocoa
 import Combine
 
+@MainActor
 final class IceBarColorManager: ObservableObject {
     @Published private(set) var colorInfo: MenuBarAverageColorInfo?
 
     private weak var iceBarPanel: IceBarPanel?
 
     private var windowImage: CGImage?
+    private var colorSource = MenuBarAverageColorInfo.Source.menuBarWindow
 
     private var cancellables = Set<AnyCancellable>()
+    private var captureTask: Task<Void, Never>?
+    private var isUpdating = false
 
     init(iceBarPanel: IceBarPanel) {
         self.iceBarPanel = iceBarPanel
+    }
+
+    isolated deinit {
+        captureTask?.cancel()
+    }
+
+    func startUpdating() {
+        guard !isUpdating, iceBarPanel?.isVisible == true else { return }
+        isUpdating = true
         configureCancellables()
+        Logger.iceBarColor.debug("Started visible panel color updates")
+    }
+
+    func stopUpdating() {
+        if isUpdating { Logger.iceBarColor.debug("Stopped panel color updates") }
+        isUpdating = false
+        cancellables.removeAll()
+        captureTask?.cancel()
+        captureTask = nil
+        windowImage = nil
+        colorInfo = nil
     }
 
     private func configureCancellables() {
@@ -25,12 +49,14 @@ final class IceBarColorManager: ObservableObject {
 
         if let iceBarPanel {
             iceBarPanel.publisher(for: \.screen)
+                .dropFirst() // Preparation already captured the panel's initial screen.
                 .receive(on: DispatchQueue.main)
-                .sink { [weak self] screen in
+                .sink { [weak self, weak iceBarPanel] screen in
                     guard
                         let self,
-                        let screen,
-                        screen == .main
+                        isUpdating,
+                        iceBarPanel?.isVisible == true,
+                        let screen
                     else {
                         return
                     }
@@ -43,12 +69,12 @@ final class IceBarColorManager: ObservableObject {
                 iceBarPanel.publisher(for: \.isVisible)
             )
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] frame, isVisible in
+            .sink { [weak self, weak iceBarPanel] frame, isVisible in
                 guard
                     let self,
-                    let screen = iceBarPanel.screen,
-                    isVisible,
-                    screen == .main
+                    isUpdating,
+                    let screen = iceBarPanel?.screen,
+                    isVisible
                 else {
                     return
                 }
@@ -74,16 +100,14 @@ final class IceBarColorManager: ObservableObject {
             .sink { [weak self, weak iceBarPanel] in
                 guard
                     let self,
+                    isUpdating,
                     let iceBarPanel,
-                    let screen = iceBarPanel.screen,
-                    screen == .main
+                    iceBarPanel.isVisible,
+                    let screen = iceBarPanel.screen
                 else {
                     return
                 }
                 updateWindowImage(for: screen)
-                if iceBarPanel.isVisible {
-                    updateColorInfo(with: iceBarPanel.frame, screen: screen)
-                }
             }
             .store(in: &c)
         }
@@ -92,13 +116,36 @@ final class IceBarColorManager: ObservableObject {
     }
 
     private func updateWindowImage(for screen: NSScreen) {
+        captureTask?.cancel()
+        captureTask = Task { [weak self] in
+            guard !Task.isCancelled, let self, isUpdating, iceBarPanel?.isVisible == true else { return }
+            await captureWindowImage(for: screen)
+            guard !Task.isCancelled, let panel = iceBarPanel, panel.isVisible else { return }
+            updateColorInfo(with: panel.frame, screen: screen)
+        }
+    }
+
+    private func captureWindowImage(for screen: NSScreen) async {
+        guard !Task.isCancelled else { return }
+        Logger.iceBarColor.debug("Capturing panel background color")
         let displayID = screen.displayID
-        if
-            let window = WindowInfo.getMenuBarWindow(for: displayID),
-            let image = ScreenCapture.captureWindow(window.windowID, option: .nominalResolution)
-        {
+        if #available(macOS 27, *) {
+            let bounds = CGDisplayBounds(displayID)
+            let strip = CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: 1)
+            let image = await ScreenCapture.captureRegion(strip)
+            guard !Task.isCancelled else { return }
             windowImage = image
+            colorSource = .menuBarScreen
+            return
+        }
+        if let window = WindowInfo.getMenuBarWindow(for: displayID) {
+            let strip = CGRect(x: window.frame.minX, y: window.frame.minY, width: window.frame.width, height: 1)
+            let image = await ScreenCapture.captureRegion(strip)
+            guard !Task.isCancelled else { return }
+            windowImage = image
+            colorSource = .menuBarScreen
         } else {
+            guard !Task.isCancelled else { return }
             windowImage = nil
         }
     }
@@ -124,11 +171,17 @@ final class IceBarColorManager: ObservableObject {
             return
         }
 
-        colorInfo = MenuBarAverageColorInfo(color: averageColor, source: .menuBarWindow)
+        colorInfo = MenuBarAverageColorInfo(color: averageColor, source: colorSource)
     }
 
-    func updateAllProperties(with frame: CGRect, screen: NSScreen) {
-        updateWindowImage(for: screen)
+    func updateAllProperties(with frame: CGRect, screen: NSScreen) async {
+        captureTask?.cancel()
+        await captureWindowImage(for: screen)
+        guard !Task.isCancelled else { return }
         updateColorInfo(with: frame, screen: screen)
     }
+}
+
+private extension Logger {
+    static let iceBarColor = Logger(category: "IceBarColor")
 }

@@ -12,10 +12,21 @@ final class IceBarPanel: NSPanel {
     private weak var appState: AppState?
 
     private(set) var currentSection: MenuBarSection.Name?
+    // SwiftUI can size the panel after its initial origin is set. In full screen
+    // on macOS 26.5 that origin can be offscreen, so NSWindow.screen is nil.
+    // Keep the requested display until close so the size update can reposition it.
+    private var presentationScreen: NSScreen?
 
     private lazy var colorManager = IceBarColorManager(iceBarPanel: self)
 
     private var cancellables = Set<AnyCancellable>()
+    private let presentation = PanelPresentation()
+    private weak var expandedInterfaceStatusItem: NSStatusItem?
+    private lazy var keyDownMonitor = UniversalEventMonitor(mask: .keyDown) { [weak self] event in
+        guard KeyCode(rawValue: Int(event.keyCode)) == .escape else { return event }
+        self?.close()
+        return nil
+    }
 
     init(appState: AppState) {
         super.init(
@@ -25,7 +36,7 @@ final class IceBarPanel: NSPanel {
             defer: false
         )
         self.appState = appState
-        self.title = "Ice Bar"
+        self.title = "Vanilla Bar"
         self.titlebarAppearsTransparent = true
         self.isMovableByWindowBackground = true
         self.allowsToolTipsWhenApplicationIsInactive = true
@@ -86,7 +97,7 @@ final class IceBarPanel: NSPanel {
             .sink { [weak self] _ in
                 guard
                     let self,
-                    let screen
+                    let screen = presentationScreen
                 else {
                     return
                 }
@@ -135,11 +146,8 @@ final class IceBarPanel: NSPanel {
 
                 guard
                     lowerBound <= upperBound,
-                    let section = appState.menuBarManager.section(withName: .visible),
-                    let windowID = section.controlItem.windowID,
-                    // Bridging.getWindowFrame is more reliable than ControlItem.windowFrame,
-                    // i.e. if the control item is offscreen.
-                    let itemFrame = Bridging.getWindowFrame(for: windowID)
+                    let itemFrame = appState.itemManager.menuBarItems(on: screen.displayID, onScreenOnly: true, activeSpaceOnly: true)
+                        .first(where: { $0.info == .iceIcon })?.frame
                 else {
                     return originForRightOfScreen
                 }
@@ -151,20 +159,62 @@ final class IceBarPanel: NSPanel {
         setFrameOrigin(getOrigin(for: appState.settingsManager.generalSettingsManager.iceBarLocation))
     }
 
-    func show(section: MenuBarSection.Name, on screen: NSScreen) async {
+    func show(section: MenuBarSection.Name, on screen: NSScreen, expandedInterfaceStatusItem: NSStatusItem? = nil) {
         guard let appState else {
             return
         }
+        close()
+        Logger.iceBarPanel.debug("Requested Vanilla Bar presentation")
+        presentationScreen = screen
+        self.expandedInterfaceStatusItem = expandedInterfaceStatusItem
 
         // Important that we set the navigation state and current section before updating the cache.
         appState.navigationState.isIceBarPresented = true
         currentSection = section
+        // Capture can delay ordering the window in. Escape must also dismiss a
+        // pending presentation, including panels opened through a hotkey on 26.
+        keyDownMonitor.start()
+
+        presentation.show { [weak self] in
+            await self?.prepare(section: section, on: screen)
+        } present: { [weak self] in
+            guard let self else { return }
+            orderFrontRegardless()
+            // On macOS 26.5, ordering this borderless panel in leaves its
+            // SwiftUI layers undrawn until the initial AppKit display pass.
+            // https://developer.apple.com/documentation/appkit/nswindow/display()
+            display()
+            Logger.iceBarPanel.debug("Presented Vanilla Bar")
+            colorManager.startUpdating()
+            self.appState?.menuBarManager.section(withName: section)?.startRehideChecks()
+        }
+    }
+
+    private func prepare(section: MenuBarSection.Name, on screen: NSScreen) async {
+        guard let appState else { return }
 
         await appState.itemManager.cacheItemsIfNeeded()
+        guard !Task.isCancelled else { return }
 
-        if ScreenCapture.cachedCheckPermissions() {
-            await appState.imageCache.updateCache()
+        if appState.imageCache.refreshPermissionState() {
+            let needsCapture: Bool
+            if #available(macOS 27, *) {
+                // Hosted overflow icons must be exposed to capture them on 27.
+                // Reuse complete previews so opening the bar does not briefly
+                // reveal every hidden icon. Normal capture updates these images
+                // when the section is exposed; new items still need a capture.
+                let items = appState.itemManager.itemCache.managedItems(for: section)
+                needsCapture = items.contains { appState.imageCache.images[$0.info] == nil }
+            } else {
+                needsCapture = true
+            }
+            if needsCapture {
+                await appState.itemManager.refreshImagesForPresentation()
+            } else {
+                Logger.iceBarPanel.debug("Reusing cached Vanilla Bar previews")
+            }
         }
+        guard !Task.isCancelled else { return }
 
         contentView = IceBarHostingView(appState: appState, colorManager: colorManager, screen: screen, section: section) { [weak self] in
             self?.close()
@@ -176,17 +226,33 @@ final class IceBarPanel: NSPanel {
         //
         // Color manager handles frame changes automatically, but does so on the main queue, so we
         // need to update manually once before showing the panel to prevent the color from flashing.
-        colorManager.updateAllProperties(with: frame, screen: screen)
-
-        orderFrontRegardless()
+        await colorManager.updateAllProperties(with: frame, screen: screen)
     }
 
     override func close() {
+        presentationScreen = nil
+        let statusItem = expandedInterfaceStatusItem
+        expandedInterfaceStatusItem = nil
+        presentation.dismiss()
+        colorManager.stopUpdating()
+        appState?.menuBarManager.cancelPendingRehide()
+        for section in appState?.menuBarManager.sections ?? [] { section.stopRehideChecks() }
+        keyDownMonitor.stop()
         super.close()
         contentView = nil
         currentSection = nil
         appState?.navigationState.isIceBarPresented = false
+        if #available(macOS 27, *) { statusItem?.expandedInterfaceSession?.cancel() }
     }
+
+    func closeExpandedInterface(for statusItem: NSStatusItem) {
+        guard expandedInterfaceStatusItem === statusItem else { return }
+        close()
+    }
+}
+
+private extension Logger {
+    static let iceBarPanel = Logger(category: "IceBarPanel")
 }
 
 // MARK: - IceBarHostingView
@@ -288,7 +354,7 @@ private struct IceBarContentView: View {
                 .frame(height: contentHeight)
                 .padding(.horizontal, horizontalPadding)
                 .padding(.vertical, verticalPadding)
-                .layoutBarStyle(appState: appState, averageColorInfo: colorManager.colorInfo)
+                .layoutBarStyle(appState: appState, averageColorInfo: colorManager.colorInfo, usesSolidBackground: true)
                 .foregroundStyle(colorManager.colorInfo?.color.brightness ?? 0 > 0.67 ? .black : .white)
                 .clipShape(clipShape)
                 .shadow(color: .black.opacity(shadowOpacity), radius: 2.5)
@@ -301,7 +367,7 @@ private struct IceBarContentView: View {
             }
         }
         .padding(5)
-        .frame(maxWidth: imageCache.screen?.frame.width)
+        .frame(maxWidth: screen.frame.width)
         .fixedSize()
         .onFrameChange(update: $frame)
     }
@@ -310,21 +376,21 @@ private struct IceBarContentView: View {
     private var content: some View {
         if !ScreenCapture.cachedCheckPermissions() {
             HStack {
-                Text("The Ice Bar requires screen recording permissions.")
+                Text("The Vanilla Bar requires screen recording permissions.")
 
                 Button {
                     closePanel()
                     appState.navigationState.settingsNavigationIdentifier = .advanced
                     appState.appDelegate?.openSettingsWindow()
                 } label: {
-                    Text("Open Ice Settings")
+                    Text("Open Vanilla Settings")
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.link)
             }
             .padding(.horizontal, 10)
         } else if menuBarManager.isMenuBarHiddenBySystemUserDefaults {
-            Text("Ice cannot display menu bar items for automatically hidden menu bars")
+            Text("Vanilla cannot display menu bar items for automatically hidden menu bars")
                 .padding(.horizontal, 10)
         } else if imageCache.cacheFailed(for: section) {
             Text("Unable to display menu bar items")
@@ -332,12 +398,12 @@ private struct IceBarContentView: View {
         } else {
             ScrollView(.horizontal) {
                 HStack(spacing: 0) {
-                    ForEach(items, id: \.windowID) { item in
+                    ForEach(items, id: \.id) { item in
                         IceBarItemView(item: item, closePanel: closePanel)
                     }
                 }
             }
-            .environment(\.isScrollEnabled, frame.width == imageCache.screen?.frame.width)
+            .environment(\.isScrollEnabled, frame.width == screen.frame.width)
             .defaultScrollAnchor(.trailing)
             .scrollIndicatorsFlash(trigger: scrollIndicatorsFlashTrigger)
             .task {
@@ -362,10 +428,7 @@ private struct IceBarItemView: View {
                 return
             }
             closePanel()
-            Task {
-                try await Task.sleep(for: .milliseconds(25))
-                itemManager.tempShowItem(item, clickWhenFinished: true, mouseButton: .left)
-            }
+            itemManager.showItemAfterClosingPanel(item, mouseButton: .left)
         }
     }
 
@@ -375,25 +438,12 @@ private struct IceBarItemView: View {
                 return
             }
             closePanel()
-            Task {
-                try await Task.sleep(for: .milliseconds(25))
-                itemManager.tempShowItem(item, clickWhenFinished: true, mouseButton: .right)
-            }
+            itemManager.showItemAfterClosingPanel(item, mouseButton: .right)
         }
     }
 
     private var image: NSImage? {
-        guard
-            let image = imageCache.images[item.info],
-            let screen = imageCache.screen
-        else {
-            return nil
-        }
-        let size = CGSize(
-            width: CGFloat(image.width) / screen.backingScaleFactor,
-            height: CGFloat(image.height) / screen.backingScaleFactor
-        )
-        return NSImage(cgImage: image, size: size)
+        imageCache.images[item.info]?.barNSImage
     }
 
     var body: some View {

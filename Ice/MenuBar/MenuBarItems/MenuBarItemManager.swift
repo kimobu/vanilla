@@ -9,6 +9,384 @@ import Combine
 /// Manager for menu bar items.
 @MainActor
 final class MenuBarItemManager: ObservableObject {
+    private var pendingPanelAction: Task<Void, Never>?
+    private var isSetUp = false
+    private var isActivatingPanelItem = false
+    private var isRestoringTempShownItems = false
+    private let cacheRequests = CoalescingTask()
+    private let accessibility = MenuBarAccessibility()
+    private let localAccessibility = MenuBarAccessibility.Local()
+    private var accessibleItems = [MenuBarItem]()
+    private var isReadingAccessibility = false
+    private var isMovingAccessibleItem = false
+    private(set) var isRefreshingHiddenImages = false
+    private let presentationCapture = LatestTask<Bool, Void>()
+
+    /// Spacing must restart publishers, not the system process hosting their
+    /// windows. Resolve a fresh snapshot before the spacing preference is written.
+    func menuBarPublisherProcessIDs() async throws -> Set<pid_t> {
+        try Task.checkCancellation()
+        guard AXIsProcessTrusted() else { throw MenuBarAccessibilitySnapshot.IncompleteReadError() }
+        let snapshot = await accessibilitySnapshot(discoverAllCandidates: true)
+        try Task.checkCancellation()
+        guard AXIsProcessTrusted() else { throw MenuBarAccessibilitySnapshot.IncompleteReadError() }
+        return try snapshot.publisherProcessIDs()
+    }
+
+    /// Discovery is asynchronous; readers use the latest complete snapshot.
+    func menuBarItems(on display: CGDirectDisplayID? = nil, onScreenOnly: Bool, activeSpaceOnly: Bool) -> [MenuBarItem] {
+        let bounds = display.map { display in
+            if #unavailable(macOS 27), let screen = NSScreen.screens.first(where: { $0.displayID == display }), let row = menuBarRow(on: screen) {
+                return row
+            }
+            return CGDisplayBounds(display)
+        }
+        return accessibleItems.filter { item in
+            guard !onScreenOnly || item.isOnScreen else { return false }
+            guard let bounds else { return true }
+            if #available(macOS 27, *) { return bounds.intersects(item.frame) }
+            return item.accessibleItem?.isOnMenuBarRow(in: bounds) == true
+        }.sortedByOrderInMenuBar()
+    }
+
+    /// Keeps discovery geometry distinct from the onscreen capture region.
+    /// On 26.5 a full-screen bar retracts to y=-62, while the inactive desktop
+    /// still has a Menubar window at y=0. Current local AX controls identify it.
+    func menuBarRow(on screen: NSScreen) -> CGRect? {
+        if let window = WindowInfo.getMenuBarWindow(for: screen.displayID) { return window.frame }
+        guard #unavailable(macOS 27), appState?.isActiveSpaceFullscreen == true else { return nil }
+        let anchors = accessibleItems.filter { $0.ownerPID == ProcessInfo.processInfo.processIdentifier }.compactMap { $0.accessibleItem?.frame }
+        let rows = WindowInfo.getAllWindows().filter {
+            $0.isWindowServerWindow && $0.layer == kCGMainMenuWindowLevel && $0.title == "Menubar"
+        }.map(\.frame)
+        return CaptureGeometry.menuBarRow(display: CGDisplayBounds(screen.displayID), candidates: rows, anchors: anchors)
+    }
+
+    private func cacheAccessibleItems() async {
+        guard AXIsProcessTrusted() else {
+            accessibleItems = []
+            itemCache.clear()
+            return
+        }
+        guard !isReadingAccessibility, !isMovingItem, !isRefreshingHiddenImages else { return }
+        isReadingAccessibility = true
+        defer { isReadingAccessibility = false }
+        let snapshot = await accessibilitySnapshot()
+        guard !Task.isCancelled, snapshot.isComplete, !isMovingItem, AXIsProcessTrusted() else { return }
+        applyAccessibleSnapshot(snapshot)
+        if #available(macOS 27, *) {
+            await arrangeSupplementalDividersIfNeeded()
+        }
+    }
+
+    @available(macOS 27, *)
+    private func arrangeSupplementalDividersIfNeeded() async {
+        guard let appState, !isMouseButtonDown, !mouseHasRecentlyMoved else { return }
+        let controls = appState.menuBarManager.sections.map(\.controlItem).filter { $0.isSectionDivider && $0.isAddedToMenuBar }
+        let pending = controls.filter(\.needsSupplementalPlacement)
+        guard !pending.isEmpty else { return }
+        // Reveal existing groups without discarding their verified order when a
+        // second section is enabled. Only new or invalidated groups need setup.
+        for control in controls { control.setTemporarilyRevealed(true) }
+        var didRestoreControls = false
+        func restoreControls() {
+            guard !didRestoreControls else { return }
+            didRestoreControls = true
+            for control in controls { control.setTemporarilyRevealed(false) }
+            let invalidated = accessibleItems.compactMap(\.accessibleItem).map { $0.removingFrame() }
+            applyAccessibleSnapshot(MenuBarAccessibilitySnapshot(items: invalidated, isComplete: true, unavailableProcessIDs: []))
+        }
+        defer { restoreControls() }
+        for control in pending { control.prepareSupplementalItems() }
+        // MenuBarAgent applies status-item lengths asynchronously. Reading in the
+        // same turn can still see the preceding collapsed bar and miss publishers.
+        guard let snapshot = await settledAccessibilitySnapshot() else { return }
+        let overflow = await prepareNativeOverflowPresentation(for: pending, snapshot: snapshot)
+        if let overflow {
+            if await clickNativeOverflow(at: overflow.point), let revealed = await settledAccessibilitySnapshot() {
+                await placeSupplementalDividers(pending, snapshot: revealed)
+            }
+        } else {
+            await placeSupplementalDividers(pending, snapshot: snapshot)
+        }
+        if let overflow {
+            restoreControls()
+            await restoreNativeOverflowPresentation(overflow)
+        }
+    }
+
+    @available(macOS 27, *)
+    private func prepareNativeOverflowPresentation(
+        for controls: [ControlItem], snapshot: MenuBarAccessibilitySnapshot, requiredItemIDs: Set<UUID> = []
+    ) async -> MenuBarAccessibility.NativeOverflowPresentation? {
+        let identifiers = Set(controls.flatMap { $0.supplementalIdentifiers + [$0.accessibilityIdentifier] })
+        let frames = snapshot.items.filter {
+            $0.processID == ProcessInfo.processInfo.processIdentifier && identifiers.contains($0.accessibilityIdentifier ?? "")
+        }.compactMap(\.frame)
+        let overlaps = frames.enumerated().contains { index, frame in
+            frames.dropFirst(index + 1).contains { frame.intersects($0) }
+        }
+        let missingGeometry = requiredItemIDs.contains { id in
+            snapshot.items.first(where: { $0.id == id })?.frame == nil
+        }
+        guard
+            overlaps || missingGeometry,
+            let screen = NSScreen.main,
+            let agent = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.apple.MenuBarAgent" })
+        else { return nil }
+        let display = CGDisplayBounds(screen.displayID)
+        let bar = CGRect(x: display.minX, y: display.minY, width: display.width, height: screen.getMenuBarHeight() ?? 0)
+        return await accessibility.prepareNativeOverflowPresentation(processID: agent.processIdentifier, menuBarBounds: bar)
+    }
+
+    @available(macOS 27, *)
+    private func restoreNativeOverflowPresentation(_ overflow: MenuBarAccessibility.NativeOverflowPresentation) async {
+        // Cancellation must not prevent the restoring click. Await this cleanup
+        // task so it cannot outlive the operation. Call after restoring divider
+        // lengths, which must settle before restoring and rechecking overflow.
+        await Task { @MainActor in
+            for attempt in 0...2 {
+                do { try await Task.sleep(for: .milliseconds(200)) } catch { break }
+                guard let point = await accessibility.nativeOverflowRestorationPoint(overflow.token) else { break }
+                guard attempt < 2 else {
+                    Logger.itemManager.error("Native menu-bar overflow did not return to its preceding state")
+                    break
+                }
+                guard await clickNativeOverflow(at: point) else { break }
+            }
+            await accessibility.endNativeOverflowPresentation(overflow.token)
+        }.value
+    }
+
+    @available(macOS 27, *)
+    private func clickNativeOverflow(at point: CGPoint) async -> Bool {
+        let modifiers: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift]
+        guard
+            let appState, let cursor = MouseCursor.locationCoreGraphics,
+            CGEventSource.flagsState(.combinedSessionState).isDisjoint(with: modifiers),
+            !CGEventSource.buttonState(.combinedSessionState, button: .left),
+            !CGEventSource.buttonState(.combinedSessionState, button: .right)
+        else { return false }
+        appState.eventManager.stopAll()
+        MouseCursor.hide()
+        defer {
+            MouseCursor.warp(to: cursor)
+            MouseCursor.show()
+            appState.eventManager.startAll()
+        }
+        do {
+            try await MenuBarItemClick.perform(at: point, button: .left)
+            // Allow the posted mouse-up to reach MenuBarAgent before warping
+            // the pointer away from its toggle.
+            try await Task.sleep(for: .milliseconds(50))
+            return true
+        } catch {
+            Logger.itemManager.error("Could not toggle native menu-bar overflow: \(error)")
+            return false
+        }
+    }
+
+    @available(macOS 27, *)
+    private func placeSupplementalDividers(_ pending: [ControlItem], snapshot: MenuBarAccessibilitySnapshot) async {
+        guard let appState else { return }
+        applyAccessibleSnapshot(snapshot)
+        let ownItems = snapshot.items.filter { $0.processID == ProcessInfo.processInfo.processIdentifier }
+        for control in pending {
+            guard var target = ownItems.first(where: { $0.accessibilityIdentifier == control.accessibilityIdentifier }) else { return }
+            // Work outward from the delimiter. Moving every spacer directly
+            // before it would dismantle an already-correct group on each retry.
+            for identifier in control.supplementalIdentifiers.reversed() {
+                guard let spacer = ownItems.first(where: { $0.accessibilityIdentifier == identifier }) else { return }
+                do {
+                    try await move(item: MenuBarItem(accessibleItem: spacer), to: .leftOfItem(MenuBarItem(accessibleItem: target)))
+                    target = spacer
+                } catch is CancellationError {
+                    return
+                } catch {
+                    Logger.itemManager.error("Could not place section spacer: \(error)")
+                    return
+                }
+            }
+        }
+        let placed = await accessibilitySnapshot()
+        guard placed.isComplete, !Task.isCancelled, let screen = NSScreen.main else { return }
+        let bounds = CGDisplayBounds(screen.displayID)
+        for control in pending {
+            let identifiers = control.supplementalIdentifiers + [control.accessibilityIdentifier]
+            let ordered = identifiers.compactMap { identifier in
+                placed.items.first { $0.processID == ProcessInfo.processInfo.processIdentifier && $0.accessibilityIdentifier == identifier }
+            }
+            guard ordered.count == identifiers.count else { return }
+            for (first, second) in zip(ordered, ordered.dropFirst()) {
+                guard AccessibleMenuBarItem.hasPlacement(
+                    itemID: first.id, targetID: second.id, placement: .before, items: placed.items, displayBounds: bounds
+                ) else { return }
+            }
+        }
+        applyAccessibleSnapshot(placed)
+        // Capture while the real icons are still available. The image cache keeps
+        // these images when the next snapshot reports overflow without geometry.
+        await appState.imageCache.updateCacheWithoutChecks(sections: MenuBarSection.Name.allCases)
+        for control in pending { control.finishSupplementalPlacement() }
+    }
+
+    private func settledAccessibilitySnapshot() async -> MenuBarAccessibilitySnapshot? {
+        var previousGeometry: [UUID: CGRect]?
+        for attempt in 0..<5 {
+            do { try await Task.sleep(for: .milliseconds(200)) } catch { return nil }
+            let snapshot = await accessibilitySnapshot(discoverAllCandidates: attempt == 0)
+            guard !Task.isCancelled else { return nil }
+            guard snapshot.isComplete else {
+                previousGeometry = nil
+                continue
+            }
+            let geometry = Dictionary(snapshot.items.map { ($0.id, $0.frame ?? .null) }, uniquingKeysWith: { first, _ in first })
+            if geometry == previousGeometry { return snapshot }
+            previousGeometry = geometry
+        }
+        return nil
+    }
+
+    /// A presentation gets a fresh image of overflow items. macOS 26 can capture
+    /// their host windows directly; macOS 27 temporarily reveals hosted controls.
+    func refreshImagesForPresentation() async {
+        _ = await presentationCapture.value(for: true) { [weak self] in
+            await self?.captureHiddenImagesForPresentation()
+        }
+    }
+
+    private func captureHiddenImagesForPresentation() async {
+        guard let appState, appState.imageCache.refreshPermissionState() else { return }
+        // Startup discovery can still be finishing when a panel is requested.
+        for _ in 0..<20 where isReadingAccessibility {
+            do { try await Task.sleep(for: .milliseconds(50)) } catch { return }
+        }
+        guard !Task.isCancelled, !isReadingAccessibility, !isMovingItem, !isRefreshingHiddenImages else { return }
+        let controls = appState.menuBarManager.sections.map(\.controlItem).filter { $0.isSectionDivider && $0.isAddedToMenuBar }
+        guard !controls.contains(where: \.needsSupplementalPlacement) else { return }
+        isRefreshingHiddenImages = true
+        defer { isRefreshingHiddenImages = false }
+        Logger.itemManager.debug("Refreshing menu bar images for presentation")
+        let screens = NSScreen.screens.map(\.frame)
+        if #unavailable(macOS 27) {
+            guard let snapshot = await settledAccessibilitySnapshot(), NSScreen.screens.map(\.frame) == screens else { return }
+            applyAccessibleSnapshot(snapshot)
+            await appState.imageCache.updateCacheWithoutChecks(sections: MenuBarSection.Name.allCases)
+            return
+        }
+        do {
+            for control in controls { control.setTemporarilyRevealed(true) }
+            var didRestoreControls = false
+            func restoreControls() {
+                guard !didRestoreControls else { return }
+                didRestoreControls = true
+                // Read the current state on restoration: a user action during the
+                // capture must not be overwritten with an earlier hiding state.
+                for control in controls { control.setTemporarilyRevealed(false) }
+                let invalidated = accessibleItems.compactMap(\.accessibleItem).map { $0.removingFrame() }
+                applyAccessibleSnapshot(MenuBarAccessibilitySnapshot(items: invalidated, isComplete: true, unavailableProcessIDs: []))
+                requestCacheRefresh()
+            }
+            defer { restoreControls() }
+            guard let snapshot = await settledAccessibilitySnapshot(), NSScreen.screens.map(\.frame) == screens else { return }
+            if #available(macOS 27, *), let overflow = await prepareNativeOverflowPresentation(for: controls, snapshot: snapshot) {
+                if
+                    await clickNativeOverflow(at: overflow.point),
+                    let revealed = await settledAccessibilitySnapshot(),
+                    NSScreen.screens.map(\.frame) == screens
+                {
+                    applyAccessibleSnapshot(revealed)
+                    await appState.imageCache.updateCacheWithoutChecks(sections: MenuBarSection.Name.allCases)
+                }
+                restoreControls()
+                await restoreNativeOverflowPresentation(overflow)
+            } else {
+                applyAccessibleSnapshot(snapshot)
+                await appState.imageCache.updateCacheWithoutChecks(sections: MenuBarSection.Name.allCases)
+            }
+        }
+        // Restore useful visible geometry before positioning the panel. If this
+        // read is cancelled, invalidated frames remain unusable until discovery.
+        if let snapshot = await settledAccessibilitySnapshot() {
+            applyAccessibleSnapshot(snapshot)
+        }
+        Logger.itemManager.debug("Restored sections after presentation capture")
+    }
+
+    private func accessibilitySnapshot(discoverAllCandidates: Bool = false) async -> MenuBarAccessibilitySnapshot {
+        let applications = NSWorkspace.shared.runningApplications.map {
+            MenuBarAccessibility.Application(
+                processID: $0.processIdentifier,
+                bundleIdentifier: $0.bundleIdentifier,
+                name: $0.localizedName ?? "Unknown",
+                launchDate: $0.launchDate
+            )
+        }
+        let local = localAccessibility.snapshot(application: MenuBarAccessibility.Application(
+            processID: ProcessInfo.processInfo.processIdentifier,
+            bundleIdentifier: Constants.bundleIdentifier,
+            name: "Vanilla",
+            launchDate: NSRunningApplication.current.launchDate
+        ))
+        return await accessibility.snapshot(applications: applications, local: local, discoverAllCandidates: discoverAllCandidates)
+    }
+
+    private func applyAccessibleSnapshot(_ snapshot: MenuBarAccessibilitySnapshot) {
+        let ownPID = ProcessInfo.processInfo.processIdentifier
+        let dividerFrames = snapshot.items.compactMap { item -> CGRect? in
+            guard item.processID == ownPID, let identifier = item.accessibilityIdentifier else { return nil }
+            guard identifier == "HItem" || identifier == "AHItem" || identifier.hasPrefix("HItem.Spacer.") || identifier.hasPrefix("AHItem.Spacer.") else { return nil }
+            return item.frame
+        }
+        let snapshot = MenuBarAccessibilitySnapshot(
+            items: snapshot.items.map { $0.processID == ownPID ? $0 : $0.validatingFrame(occludedBy: dividerFrames) },
+            isComplete: snapshot.isComplete,
+            unavailableProcessIDs: snapshot.unavailableProcessIDs
+        )
+        let previous = itemCache
+        accessibleItems = snapshot.items.map { MenuBarItem(accessibleItem: $0) }
+        guard let screen = NSScreen.main, let bar = menuBarRow(on: screen) else { return }
+        // A native overflow panel's rows are on screen, but their horizontal
+        // positions do not describe section boundaries in the actual menu bar.
+        var items = accessibleItems.filter {
+            if #available(macOS 27, *) { return $0.accessibleItem?.isLocated(in: bar) == true }
+            return $0.accessibleItem?.isOnMenuBarRow(in: bar) == true
+        }.sortedByOrderInMenuBar()
+        let hidden = items.firstIndex(matching: .hiddenControlItem).map { items.remove(at: $0) }
+        let alwaysHidden = items.firstIndex(matching: .alwaysHiddenControlItem).map { items.remove(at: $0) }
+        var cache = ItemCache()
+        if let hidden {
+            cache = makeItemCache(hiddenControlItem: hidden, alwaysHiddenControlItem: alwaysHidden, otherItems: items)
+        } else {
+            // The old oversized separator can disappear on macOS 27. Keep known
+            // membership until its replacement is available instead of clearing every item.
+            for item in items {
+                cache[itemCache.section(for: item) ?? .visible].append(item)
+            }
+        }
+        let menuBarBounds = NSScreen.screens.compactMap { menuBarRow(on: $0) }
+        let assignedItemIDs = Set(cache.allItems.compactMap { $0.accessibleItem?.id })
+        // Retain section membership only for still-discovered items whose menu-bar
+        // geometry is unavailable. Items on another display are not overflow here.
+        // macOS 26 offscreen frames can already assign an item to a new section;
+        // do not also retain that item in its previous section.
+        for section in MenuBarSection.Name.allCases {
+            cache[section] = AccessibleMenuBarItem.retainingUnpositionedItems(
+                current: cache[section].compactMap(\.accessibleItem),
+                previous: previous[section].compactMap(\.accessibleItem),
+                snapshot: snapshot.items,
+                menuBarBounds: menuBarBounds,
+                assignedItemIDs: assignedItemIDs
+            ).map { MenuBarItem(accessibleItem: $0) }
+        }
+        itemCache = cache
+        Logger.itemManager.debug("Section counts: visible \(cache[.visible].count), hidden \(cache[.hidden].count), always hidden \(cache[.alwaysHidden].count)")
+    }
+
+    isolated deinit {
+        performTeardown()
+    }
+
     /// Cache for menu bar items.
     struct ItemCache: Hashable {
         /// All cached menu bar items, keyed by section.
@@ -76,21 +454,15 @@ final class MenuBarItemManager: ObservableObject {
         let returnDestination: MoveDestination
 
         /// The window of the item's shown interface.
-        let shownInterfaceWindow: WindowInfo?
+        var shownInterfaceWindow: WindowInfo?
 
         /// A Boolean value that indicates whether the menu bar item's interface is showing.
         var isShowingInterface: Bool {
             guard let currentWindow = shownInterfaceWindow.flatMap({ WindowInfo(windowID: $0.windowID) }) else {
                 return false
             }
-            return if
-                currentWindow.layer != CGWindowLevelForKey(.popUpMenuWindow),
-                let owningApplication = currentWindow.owningApplication
-            {
-                owningApplication.isActive && currentWindow.isOnScreen
-            } else {
-                currentWindow.isOnScreen
-            }
+            // A status-item popover can remain visible without activating its app.
+            return currentWindow.isOnScreen
         }
     }
 
@@ -110,7 +482,8 @@ final class MenuBarItemManager: ObservableObject {
     private var tempShownItemContexts = [TempShownItemContext]()
 
     /// A timer that determines when to rehide the temporarily shown items.
-    private var tempShownItemsTimer: Timer?
+    private let tempShownItemDelay = DelayedAction<Bool>()
+    private let restorationRequests = CoalescingTask()
 
     /// The last time a menu bar item was moved.
     private var lastItemMoveStartDate: Date?
@@ -166,7 +539,27 @@ final class MenuBarItemManager: ObservableObject {
 
     /// Sets up the manager.
     func performSetup() {
+        performTeardown()
+        isSetUp = true
         configureCancellables()
+        if !tempShownItemContexts.isEmpty { runTempShownItemTimer(for: 3) }
+    }
+
+    func performTeardown() {
+        isSetUp = false
+        cancellables.removeAll()
+        cacheRequests.cancel()
+        presentationCapture.cancel()
+        pendingPanelAction?.cancel()
+        pendingPanelAction = nil
+        tempShownItemDelay.cancel()
+        restorationRequests.cancel()
+    }
+
+    private func requestCacheRefresh() {
+        cacheRequests.schedule { [weak self] in
+            await self?.cacheItemsIfNeeded()
+        }
     }
 
     /// Configures the internal observers for the manager.
@@ -177,24 +570,14 @@ final class MenuBarItemManager: ObservableObject {
             .autoconnect()
             .merge(with: Just(.now))
             .sink { [weak self] _ in
-                guard let self else {
-                    return
-                }
-                Task {
-                    await self.cacheItemsIfNeeded()
-                }
+                self?.requestCacheRefresh()
             }
             .store(in: &c)
 
         NSWorkspace.shared.publisher(for: \.runningApplications)
             .delay(for: 0.25, scheduler: DispatchQueue.main)
             .sink { [weak self] _ in
-                guard let self else {
-                    return
-                }
-                Task {
-                    await self.cacheItemsIfNeeded()
-                }
+                self?.requestCacheRefresh()
             }
             .store(in: &c)
 
@@ -239,11 +622,11 @@ extension MenuBarItemManager {
 
     /// Caches the given menu bar items, without checking whether the control
     /// items are in the correct order.
-    private func uncheckedCacheItems(
+    private func makeItemCache(
         hiddenControlItem: MenuBarItem,
         alwaysHiddenControlItem: MenuBarItem?,
         otherItems: [MenuBarItem]
-    ) {
+    ) -> ItemCache {
         Logger.itemManager.debug("Caching menu bar items")
 
         let predicates = Predicates.sectionPredicates(
@@ -307,61 +690,13 @@ extension MenuBarItemManager {
             }
         }
 
-        itemCache = cache
+        return cache
     }
 
     /// Caches the current menu bar items if needed, ensuring that the control
     /// items are in the correct order.
     func cacheItemsIfNeeded() async {
-        do {
-            try await waitForItemsToStopMoving(timeout: .seconds(1))
-        } catch is TaskTimeoutError {
-            logSkippingCache(reason: "an item is currently being moved")
-            return
-        } catch {
-            guard !itemHasRecentlyMoved else {
-                logSkippingCache(reason: "an item was recently moved")
-                return
-            }
-        }
-
-        let itemWindowIDs = Bridging.getWindowList(option: [.menuBarItems, .activeSpace])
-        if cachedItemWindowIDs == itemWindowIDs {
-            logSkippingCache(reason: "item windows have not changed")
-            return
-        } else {
-            cachedItemWindowIDs = itemWindowIDs
-        }
-
-        var items = MenuBarItem.getMenuBarItems(onScreenOnly: false, activeSpaceOnly: true)
-
-        let hiddenControlItem = items.firstIndex(matching: .hiddenControlItem).map { items.remove(at: $0) }
-        let alwaysHiddenControlItem = items.firstIndex(matching: .alwaysHiddenControlItem).map { items.remove(at: $0) }
-
-        guard let hiddenControlItem else {
-            Logger.itemManager.warning("Missing control item for hidden section")
-            Logger.itemManager.debug("Clearing menu bar item cache")
-            itemCache.clear()
-            return
-        }
-
-        do {
-            if let alwaysHiddenControlItem {
-                try await enforceControlItemOrder(
-                    hiddenControlItem: hiddenControlItem,
-                    alwaysHiddenControlItem: alwaysHiddenControlItem
-                )
-            }
-            uncheckedCacheItems(
-                hiddenControlItem: hiddenControlItem,
-                alwaysHiddenControlItem: alwaysHiddenControlItem,
-                otherItems: items
-            )
-        } catch {
-            Logger.itemManager.error("Error enforcing control item order: \(error)")
-            Logger.itemManager.debug("Clearing menu bar item cache")
-            itemCache.clear()
-        }
+        await cacheAccessibleItems()
     }
 }
 
@@ -484,13 +819,17 @@ extension MenuBarItemManager {
     /// - Parameters:
     ///   - timeout: Amount of time to wait before throwing an error.
     ///   - operation: The operation to perform.
-    private func waitWithTask(timeout: Duration?, operation: @escaping @Sendable () async throws -> Void) async throws {
+    private func waitWithTask(timeout: Duration?, operation: @MainActor @escaping @Sendable () async throws -> Void) async throws {
         let task = if let timeout {
             Task(timeout: timeout, operation: operation)
         } else {
             Task(operation: operation)
         }
-        try await task.value
+        try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     /// Waits asynchronously for all menu bar items to stop moving.
@@ -501,7 +840,7 @@ extension MenuBarItemManager {
             guard let self else {
                 return
             }
-            while await isMovingItem {
+            while isMovingItem {
                 try Task.checkCancellation()
                 try await Task.sleep(for: .milliseconds(10))
             }
@@ -520,7 +859,7 @@ extension MenuBarItemManager {
             }
             while true {
                 try Task.checkCancellation()
-                guard let date = await lastMouseMoveStartDate else {
+                guard let date = lastMouseMoveStartDate else {
                     break
                 }
                 if Date.now.timeIntervalSince(date) > threshold {
@@ -584,7 +923,7 @@ extension MenuBarItemManager {
     ///
     /// - Parameter item: The item to return the current frame for.
     private func getCurrentFrame(for item: MenuBarItem) -> CGRect? {
-        guard let frame = Bridging.getWindowFrame(for: item.window.windowID) else {
+        guard let windowID = item.windowID, let frame = Bridging.getWindowFrame(for: windowID) else {
             Logger.itemManager.error("Couldn't get current frame for \(item.logString)")
             return nil
         }
@@ -1067,12 +1406,220 @@ extension MenuBarItemManager {
         }
     }
 
+    /// Reads fresh AX geometry before dragging and verifies order after mouse-up.
+    private func moveAccessibleItem(_ item: MenuBarItem, to destination: MoveDestination, timeout: Duration = .seconds(2)) async throws {
+        guard !isMovingAccessibleItem, !isRefreshingHiddenImages else { throw EventError(code: .invalidItem, item: item) }
+        isMovingAccessibleItem = true
+        itemMoveCount += 1
+        defer {
+            isMovingAccessibleItem = false
+            itemMoveCount -= 1
+            lastItemMoveStartDate = .now
+        }
+        try await withRevealedMenuBar(for: item) {
+            try await performAccessibleMove(item, to: destination, timeout: timeout)
+        }
+    }
+
+    private func performAccessibleMove(_ item: MenuBarItem, to destination: MoveDestination, timeout: Duration) async throws {
+        let target = getTargetItem(for: destination)
+        guard item.isMovable else { throw EventError(code: .notMovable, item: item) }
+        guard let itemID = item.accessibleItem?.id, let targetID = target.accessibleItem?.id else {
+            throw EventError(code: .invalidItem, item: item)
+        }
+        guard let appState else { throw EventError(code: .invalidAppState, item: item) }
+        // Include mouse buttons: a layout drop can arrive before its release has
+        // reached the global input state. Ignore Caps Lock, which is not a held key.
+        let inputDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        let modifiers: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift]
+        while !CGEventSource.flagsState(.combinedSessionState).isDisjoint(with: modifiers) ||
+            CGEventSource.buttonState(.combinedSessionState, button: .left) ||
+            CGEventSource.buttonState(.combinedSessionState, button: .right) {
+            guard ContinuousClock.now < inputDeadline else { throw EventError(code: .eventOperationTimeout, item: item) }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        try await waitForMouseToStopMoving(timeout: .seconds(2))
+        var snapshot = await accessibilitySnapshot()
+        var restoreReveal: (() -> Void)?
+        defer { restoreReveal?() }
+        let dividers = appState.menuBarManager.sections.map(\.controlItem).filter { $0.isSectionDivider && $0.isAddedToMenuBar }
+        let dividerIdentifiers = Set(dividers.flatMap { $0.supplementalIdentifiers + [$0.accessibilityIdentifier] })
+        let targetsDivider = target.accessibleItem.map { $0.processID == ProcessInfo.processInfo.processIdentifier && dividerIdentifiers.contains($0.accessibilityIdentifier ?? "") } ?? false
+        let sourceFrame = snapshot.items.first { $0.id == itemID }?.frame
+        let destinationFrame = snapshot.items.first { $0.id == targetID }?.frame
+        if (sourceFrame == nil || destinationFrame == nil || !item.isOnScreen || !target.isOnScreen || targetsDivider) && !dividers.contains(where: \.needsSupplementalPlacement) {
+            // Internal spacer placement already runs with small dividers. Do
+            // not interfere with that operation while it establishes order.
+            let controls = dividers
+            for control in controls { control.setTemporarilyRevealed(true) }
+            restoreReveal = {
+                for control in controls { control.setTemporarilyRevealed(false) }
+                let invalidated = self.accessibleItems.compactMap(\.accessibleItem).map { $0.removingFrame() }
+                self.applyAccessibleSnapshot(MenuBarAccessibilitySnapshot(items: invalidated, isComplete: true, unavailableProcessIDs: []))
+                self.requestCacheRefresh()
+            }
+            guard let expanded = await settledAccessibilitySnapshot() else { throw EventError(code: .invalidItem, item: item) }
+            snapshot = expanded
+            applyAccessibleSnapshot(snapshot)
+            if #available(macOS 27, *), let overflow = await prepareNativeOverflowPresentation(for: controls, snapshot: snapshot, requiredItemIDs: [itemID, targetID]) {
+                // On a notched display, shrinking Vanilla's dividers can leave
+                // source and target frames clamped beneath native overflow.
+                // Restore divider lengths before closing overflow, including
+                // when geometry validation, dragging, or cancellation throws.
+                do {
+                    guard
+                        await clickNativeOverflow(at: overflow.point),
+                        let revealed = await settledAccessibilitySnapshot()
+                    else { throw EventError(code: .invalidItem, item: item) }
+                    applyAccessibleSnapshot(revealed)
+                    try await dragAccessibleItem(item, to: destination, snapshot: revealed, timeout: timeout)
+                } catch {
+                    restoreReveal?()
+                    restoreReveal = nil
+                    await restoreNativeOverflowPresentation(overflow)
+                    throw error
+                }
+                restoreReveal?()
+                restoreReveal = nil
+                await restoreNativeOverflowPresentation(overflow)
+                return
+            }
+        }
+        try await dragAccessibleItem(item, to: destination, snapshot: snapshot, timeout: timeout)
+    }
+
+    private func dragAccessibleItem(
+        _ item: MenuBarItem, to destination: MoveDestination, snapshot: MenuBarAccessibilitySnapshot, timeout: Duration, correctsGroupPlacement: Bool = true
+    ) async throws {
+        let target = getTargetItem(for: destination)
+        guard let itemID = item.accessibleItem?.id, let targetID = target.accessibleItem?.id else {
+            throw EventError(code: .invalidItem, item: item)
+        }
+        guard let appState else { throw EventError(code: .invalidAppState, item: item) }
+        try Task.checkCancellation()
+        guard
+            snapshot.isComplete,
+            let frame = snapshot.items.first(where: { $0.id == itemID })?.frame,
+            let targetFrame = snapshot.items.first(where: { $0.id == targetID })?.frame,
+            let screen = NSScreen.screens.first(where: { CGDisplayBounds($0.displayID).contains(frame) && CGDisplayBounds($0.displayID).contains(targetFrame) }),
+            let cursor = MouseCursor.locationCoreGraphics
+        else { throw EventError(code: .invalidItem, item: item) }
+        let bounds = CGDisplayBounds(screen.displayID)
+        let barBounds = CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: screen.getMenuBarHeight() ?? 0)
+        guard barBounds.contains(frame), barBounds.contains(targetFrame) else { throw EventError(code: .invalidItem, item: item) }
+        let placement: AccessibleMenuBarItem.Placement = switch destination {
+        case .leftOfItem: .before
+        case .rightOfItem: .after
+        }
+        var sourceBoundaryID = itemID
+        var targetBoundaryID = targetID
+        var destinationFrame = targetFrame
+        var dragFrame = frame
+        var movesGroup = false
+        if #available(macOS 27, *) {
+            let sourceGroup = AccessibleMenuBarItem.movementGroup(containing: itemID, items: snapshot.items, menuBarBounds: barBounds)
+            let targetGroup = AccessibleMenuBarItem.movementGroup(containing: targetID, items: snapshot.items, menuBarBounds: barBounds)
+            if sourceGroup.contains(where: { $0.id == targetID }) { return }
+            let sourceBoundary = placement == .before ? sourceGroup.last : sourceGroup.first
+            let targetBoundary = placement == .before ? targetGroup.first : targetGroup.last
+            guard let sourceBoundary, let targetBoundary, let boundaryFrame = targetBoundary.frame else {
+                throw EventError(code: .invalidItem, item: item)
+            }
+            movesGroup = sourceGroup.count > 1
+            dragFrame = sourceGroup.compactMap(\.frame).reduce(CGRect.null) { $0.union($1) }
+            sourceBoundaryID = sourceBoundary.id
+            targetBoundaryID = targetBoundary.id
+            destinationFrame = boundaryFrame
+        }
+        // Coincident overflow proxies do not identify a usable source/target.
+        // A destination inside the source's movement group was handled above.
+        guard frame.maxX <= destinationFrame.minX || destinationFrame.maxX <= frame.minX else {
+            throw EventError(code: .invalidItem, item: item)
+        }
+        if AccessibleMenuBarItem.hasPlacement(itemID: sourceBoundaryID, targetID: targetBoundaryID, placement: placement, items: snapshot.items, displayBounds: bounds) { return }
+        let endX: CGFloat
+        if #available(macOS 27, *) {
+            let inset = min(1, destinationFrame.width / 4)
+            endX = placement == .before ? destinationFrame.minX + inset : destinationFrame.maxX - inset
+        } else {
+            endX = placement == .before ? destinationFrame.minX - 1 : destinationFrame.maxX + 1
+        }
+        let end = CGPoint(x: endX, y: targetFrame.midY)
+        guard bounds.contains(end) else { throw EventError(code: .invalidItem, item: item) }
+        Logger.itemManager.debug("Dragging item \(itemID) relative to \(targetID): source \(NSStringFromRect(dragFrame)), target \(NSStringFromRect(destinationFrame))")
+        var latest = snapshot
+        do {
+            appState.eventManager.stopAll()
+            MouseCursor.hide()
+            defer {
+                MouseCursor.warp(to: cursor)
+                MouseCursor.show()
+                appState.eventManager.startAll()
+            }
+            try await MenuBarItemDrag.perform(from: CGPoint(x: dragFrame.midX, y: dragFrame.midY), to: end)
+            let deadline = ContinuousClock.now.advanced(by: timeout)
+            repeat {
+                try await Task.sleep(for: .milliseconds(50))
+                let updated = await accessibilitySnapshot()
+                try Task.checkCancellation()
+                guard AXIsProcessTrusted() else { throw EventError(code: .couldNotComplete, item: item) }
+                if updated.isComplete {
+                    latest = updated
+                    applyAccessibleSnapshot(updated)
+                    if AccessibleMenuBarItem.hasPlacement(itemID: sourceBoundaryID, targetID: targetBoundaryID, placement: placement, items: updated.items, displayBounds: bounds) {
+                        return
+                    }
+                }
+            } while ContinuousClock.now < deadline
+        }
+        // Linked instances can settle a slot beyond the requested neighbor.
+        // Re-read the changed layout and permit one corrective drag, retaining
+        // the same strict adjacency check. An unchanged position is not retried.
+        if
+            correctsGroupPlacement, movesGroup,
+            let movedFrame = latest.items.first(where: { $0.id == itemID })?.frame,
+            movedFrame != frame
+        {
+            try await dragAccessibleItem(item, to: destination, snapshot: latest, timeout: timeout, correctsGroupPlacement: false)
+            return
+        }
+        let finalSource = latest.items.first(where: { $0.id == sourceBoundaryID })?.frame
+        let finalTarget = latest.items.first(where: { $0.id == targetBoundaryID })?.frame
+        Logger.itemManager.debug("Drag order was not confirmed: source \(String(describing: finalSource)), target \(String(describing: finalTarget))")
+        throw EventError(code: .frameCheckTimeout, item: item)
+    }
+
+    /// Uses the outer edge of a divider group so a hidden item cannot land
+    /// between the supplemental spacers and the main delimiter on macOS 27.
+    func movementDestination(for section: MenuBarSection.Name) -> MoveDestination? {
+        guard let appState, appState.menuBarManager.section(withName: section)?.isEnabled == true else { return nil }
+        let dividerSection: MenuBarSection.Name = section == .visible ? .hidden : section
+        guard let control = appState.menuBarManager.section(withName: dividerSection)?.controlItem else { return nil }
+        var identifier = control.accessibilityIdentifier
+        if #available(macOS 27, *), section != .visible {
+            guard !control.needsSupplementalPlacement else { return nil }
+            identifier = control.supplementalIdentifiers.first ?? identifier
+        }
+        let items = menuBarItems(onScreenOnly: false, activeSpaceOnly: true)
+        guard let target = items.first(where: {
+            if let accessible = $0.accessibleItem {
+                return accessible.processID == ProcessInfo.processInfo.processIdentifier && accessible.accessibilityIdentifier == identifier
+            }
+            return $0.info.namespace == .ice && $0.info.title == identifier
+        }) else { return nil }
+        return section == .visible ? .rightOfItem(target) : .leftOfItem(target)
+    }
+
     /// Moves a menu bar item to the given destination.
     ///
     /// - Parameters:
     ///   - item: A menu bar item to move.
     ///   - destination: A destination to move the menu bar item.
     func move(item: MenuBarItem, to destination: MoveDestination) async throws {
+        if item.accessibleItem != nil {
+            try await moveAccessibleItem(item, to: destination)
+            return
+        }
         if try itemHasCorrectPosition(item: item, for: destination) {
             Logger.itemManager.debug("\(item.logString) is already in the correct position")
             return
@@ -1142,6 +1689,11 @@ extension MenuBarItemManager {
     ///   - destination: A destination to move the menu bar item.
     ///   - timeout: Amount of time to wait before throwing an error.
     func slowMove(item: MenuBarItem, to destination: MoveDestination, timeout: Duration = .seconds(1)) async throws {
+        if item.accessibleItem != nil {
+            // The Accessibility move already waits for verified neighboring positions.
+            try await moveAccessibleItem(item, to: destination, timeout: timeout)
+            return
+        }
         itemMoveCount += 1
         defer {
             itemMoveCount -= 1
@@ -1168,6 +1720,21 @@ extension MenuBarItemManager {
 extension MenuBarItemManager {
     /// Clicks the given menu bar item with the given mouse button.
     func click(item: MenuBarItem, with mouseButton: CGMouseButton) async throws {
+        if let accessibleItem = item.accessibleItem {
+            guard mouseButton == .left || mouseButton == .right else { throw EventError(code: .couldNotComplete, item: item) }
+            if #unavailable(macOS 27) {
+                try await clickVisibleAccessibleItem(item, with: mouseButton)
+                return
+            }
+            let succeeded: Bool
+            if accessibleItem.processID == ProcessInfo.processInfo.processIdentifier {
+                succeeded = localAccessibility.performAction(itemID: accessibleItem.id, showMenu: mouseButton == .right)
+            } else {
+                succeeded = await accessibility.performAction(itemID: accessibleItem.id, showMenu: mouseButton == .right)
+            }
+            guard succeeded else { throw EventError(code: .couldNotComplete, item: item) }
+            return
+        }
         guard let source = CGEventSource(stateID: .hidSystemState) else {
             throw EventError(code: .invalidEventSource, item: item)
         }
@@ -1251,6 +1818,107 @@ extension MenuBarItemManager {
             throw error
         }
     }
+
+    /// Hosted items on macOS 26 need the native bar onscreen for input, even
+    /// though their offscreen images can be captured. Reveal through pointer
+    /// motion before activation or restoration, then restore the pointer.
+    /// Verified on 26.5; macOS 27 uses its existing Accessibility path.
+    private func withRevealedMenuBar(
+        for item: MenuBarItem, preserveMenuTracking: Bool = false, operation: () async throws -> Void
+    ) async throws {
+        try Task.checkCancellation()
+        guard
+            #unavailable(macOS 27), item.accessibleItem != nil,
+            appState?.isActiveSpaceFullscreen == true,
+            let screen = NSScreen.main,
+            WindowInfo.getMenuBarWindow(for: screen.displayID) == nil
+        else {
+            try await operation()
+            return
+        }
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        let modifiers: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift]
+        while !CGEventSource.flagsState(.combinedSessionState).isDisjoint(with: modifiers) || isMouseButtonDown {
+            guard ContinuousClock.now < deadline else { throw EventError(code: .eventOperationTimeout, item: item) }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard AXIsProcessTrusted(), let cursor = MouseCursor.locationCoreGraphics else {
+            throw EventError(code: .invalidCursorLocation, item: item)
+        }
+        let bounds = CGDisplayBounds(screen.displayID)
+        let space = Bridging.activeSpaceID
+        MouseCursor.hide()
+        defer {
+            if preserveMenuTracking && !Task.isCancelled {
+                // Retraction can obscure a newly opened third-party panel on
+                // 26.5. Let its own tracking handle subsequent pointer motion.
+                MouseCursor.warp(to: cursor)
+            } else {
+                // A warp alone leaves the system's hover state at the edge.
+                // Restoration and cancellation must clear that state too.
+                do {
+                    try MenuBarItemClick.movePointer(to: cursor)
+                } catch {
+                    MouseCursor.warp(to: cursor)
+                    Logger.itemManager.error("Could not restore pointer motion: \(error)")
+                }
+            }
+            MouseCursor.show()
+        }
+        try Task.checkCancellation()
+        try MenuBarItemClick.movePointer(to: CGPoint(x: bounds.minX + bounds.width * 0.75, y: bounds.minY))
+        let revealDeadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while WindowInfo.getMenuBarWindow(for: screen.displayID) == nil {
+            guard ContinuousClock.now < revealDeadline else { throw EventError(code: .eventOperationTimeout, item: item) }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        guard
+            let snapshot = await settledAccessibilitySnapshot(),
+            AXIsProcessTrusted(), Bridging.activeSpaceID == space,
+            CGDisplayBounds(screen.displayID) == bounds
+        else { throw EventError(code: .invalidItem, item: item) }
+        try Task.checkCancellation()
+        applyAccessibleSnapshot(snapshot)
+        try await operation()
+    }
+
+    /// macOS 26's hosted status items need input at their visible position.
+    /// Re-read geometry after temporary placement; the pre-move frame is stale.
+    private func clickVisibleAccessibleItem(_ item: MenuBarItem, with button: CGMouseButton) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        let modifiers: CGEventFlags = [.maskCommand, .maskControl, .maskAlternate, .maskShift]
+        while !CGEventSource.flagsState(.combinedSessionState).isDisjoint(with: modifiers) || isMouseButtonDown {
+            guard ContinuousClock.now < deadline else { throw EventError(code: .eventOperationTimeout, item: item) }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        guard
+            let appState,
+            let itemID = item.accessibleItem?.id,
+            !isMovingAccessibleItem, !isRefreshingHiddenImages,
+            let snapshot = await settledAccessibilitySnapshot(),
+            let frame = snapshot.items.first(where: { $0.id == itemID })?.frame,
+            !frame.isNull, !frame.isEmpty,
+            NSScreen.screens.contains(where: { screen in
+                let bounds = CGDisplayBounds(screen.displayID)
+                let bar = CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: screen.getMenuBarHeight() ?? 0)
+                return bar.contains(frame)
+            }),
+            let cursor = MouseCursor.locationCoreGraphics
+        else { throw EventError(code: .invalidItem, item: item) }
+        guard
+            CGEventSource.flagsState(.combinedSessionState).isDisjoint(with: modifiers),
+            !isMouseButtonDown
+        else { throw EventError(code: .couldNotComplete, item: item) }
+        appState.eventManager.stopAll()
+        MouseCursor.hide()
+        defer {
+            MouseCursor.warp(to: cursor)
+            MouseCursor.show()
+            appState.eventManager.startAll()
+        }
+        try await MenuBarItemClick.perform(at: CGPoint(x: frame.midX, y: frame.midY), button: button)
+        try await Task.sleep(for: .milliseconds(50))
+    }
 }
 
 // MARK: - Temporarily Show Items
@@ -1269,47 +1937,80 @@ extension MenuBarItemManager {
         return nil
     }
 
-    /// Schedules a timer for the given interval, attempting to rehide the current
-    /// temporarily shown items when the timer fires.
+    /// Restarts the restore deadline and keeps the subsequent work owned.
     private func runTempShownItemTimer(for interval: TimeInterval) {
-        Logger.itemManager.debug("Running rehide timer for temporarily shown items with interval: \(interval)")
-        tempShownItemsTimer?.invalidate()
-        tempShownItemsTimer = .scheduledTimer(withTimeInterval: interval, repeats: false) { [weak self] timer in
-            guard let self else {
-                timer.invalidate()
-                return
-            }
-            Logger.itemManager.debug("Rehide timer fired")
-            Task {
-                await self.rehideTempShownItems()
+        guard isSetUp else { return }
+        Logger.itemManager.debug("Scheduling restoration of temporarily shown items after: \(interval)")
+        tempShownItemDelay.cancel()
+        tempShownItemDelay.schedule(key: true, after: .seconds(interval)) { [weak self] in
+            self?.restorationRequests.schedule { [weak self] in
+                await self?.rehideTempShownItems()
             }
         }
     }
 
-    /// Temporarily shows the given item.
-    ///
-    /// The item is cached alongside a destination that it will be automatically returned
-    /// to. If `true` is passed to the `clickWhenFinished` parameter, the item is clicked
-    /// once movement is finished.
-    ///
-    /// - Parameters:
-    ///   - item: An item to show.
-    ///   - clickWhenFinished: A Boolean value that indicates whether the item should be
-    ///     clicked once movement is finished.
-    ///   - mouseButton: The mouse button of the click.
-    func tempShowItem(_ item: MenuBarItem, clickWhenFinished: Bool, mouseButton: CGMouseButton) {
+    /// Lets a search or Vanilla Bar panel close before showing and clicking its item.
+    func showItemAfterClosingPanel(_ item: MenuBarItem, mouseButton: CGMouseButton) {
+        let previousAction = pendingPanelAction
+        previousAction?.cancel()
+        pendingPanelAction = Task { [weak self] in
+            // A cancelled drag must release its input and restore the section
+            // before the next activation reads geometry or starts moving.
+            await previousAction?.value
+            // Search accepts input before previews finish. Let the shared
+            // capture restore divider/overflow state before activating a result.
+            await self?.presentationCapture.waitForCompletion()
+            do {
+                try Task.checkCancellation()
+                try await Task.sleep(for: .milliseconds(25))
+                while self?.isRestoringTempShownItems == true {
+                    try await Task.sleep(for: .milliseconds(25))
+                }
+            } catch {
+                return
+            }
+            guard let self, isSetUp, !Task.isCancelled else { return }
+            isActivatingPanelItem = true
+            defer { isActivatingPanelItem = false }
+            if #available(macOS 27, *), item.accessibleItem != nil {
+                // Semantic activation does not need a visible icon or its stale
+                // pre-overflow coordinates. Keep it in this cancellable task.
+                do {
+                    try await click(item: item, with: mouseButton)
+                } catch {
+                    Logger.itemManager.error("Could not activate menu bar item: \(error)")
+                }
+            } else {
+                await tempShowItem(item, mouseButton: mouseButton)
+            }
+        }
+    }
+
+    /// Shows and clicks an item, retaining its original position until restored.
+    private func tempShowItem(_ item: MenuBarItem, mouseButton: CGMouseButton) async {
+        do {
+            try await withRevealedMenuBar(for: item, preserveMenuTracking: true) {
+                await activateTempShownItem(item, mouseButton: mouseButton)
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            Logger.itemManager.error("Could not reveal menu bar for activation: \(error)")
+        }
+    }
+
+    private func activateTempShownItem(_ item: MenuBarItem, mouseButton: CGMouseButton) async {
+        guard !Task.isCancelled else { return }
         if
-            let latest = MenuBarItem(windowID: item.windowID),
+            let latest = accessibleItems.first(where: { $0.id == item.id }),
             latest.isOnScreen
         {
-            if clickWhenFinished {
-                Task {
-                    do {
-                        try await click(item: latest, with: mouseButton)
-                    } catch {
-                        Logger.itemManager.error("ERROR: \(error)")
-                    }
-                }
+            do {
+                try await click(item: latest, with: mouseButton)
+            } catch is CancellationError {
+                return
+            } catch {
+                Logger.itemManager.error("Could not activate visible item: \(error)")
             }
             return
         }
@@ -1325,17 +2026,15 @@ extension MenuBarItemManager {
 
         Logger.itemManager.info("Temporarily showing \(item.logString)")
 
-        var items = MenuBarItem.getMenuBarItems(onScreenOnly: false, activeSpaceOnly: true)
+        var items = menuBarItems(onScreenOnly: false, activeSpaceOnly: true)
 
         guard let destination = getReturnDestination(for: item, in: items) else {
             Logger.itemManager.warning("No return destination for \(item.logString)")
             return
         }
 
-        // Remove all items up to the hidden control item.
-        items.trimPrefix { $0.info != .hiddenControlItem }
-        // Remove the hidden control item.
-        items.removeFirst()
+        guard let dividerIndex = items.firstIndex(where: { $0.info == .hiddenControlItem }) else { return }
+        items.removeFirst(dividerIndex + 1)
         // Remove all offscreen items.
         items.trimPrefix { !$0.isOnScreen }
 
@@ -1348,57 +2047,72 @@ extension MenuBarItemManager {
         // Remove items until we have enough room to show this item.
         items.trimPrefix { $0.frame.minX - item.frame.width <= maxX }
 
-        guard let targetItem = items.first else {
+        // Control Center's recording indicator moves to the left edge when
+        // sections expand on macOS 26.5. It cannot anchor a visible placement.
+        guard let targetItem = items.first(where: \.canBeHidden) else {
             let alert = NSAlert()
             alert.messageText = "Not enough room to show \"\(item.displayName)\""
             alert.runModal()
             return
         }
 
-        let initialWindows = WindowInfo.getOnScreenWindows()
-
-        Task {
-            if clickWhenFinished {
-                do {
-                    try await slowMove(item: item, to: .leftOfItem(targetItem))
-                    try await click(item: item, with: mouseButton)
-                } catch {
-                    Logger.itemManager.error("ERROR: \(error)")
-                }
-            } else {
-                do {
-                    try await move(item: item, to: .leftOfItem(targetItem))
-                } catch {
-                    Logger.itemManager.error("ERROR: \(error)")
-                }
-            }
-
-            try? await Task.sleep(for: .milliseconds(100))
-
-            let currentWindows = WindowInfo.getOnScreenWindows()
-
-            let shownInterfaceWindow = currentWindows.first { currentWindow in
-                currentWindow.ownerPID == item.ownerPID &&
-                !initialWindows.contains { initialWindow in
-                    currentWindow.windowID == initialWindow.windowID
-                }
-            }
-
-            let context = TempShownItemContext(
+        // Record before moving: cancellation may arrive after mouse-up, when
+        // the item has moved but placement verification has not completed.
+        if !tempShownItemContexts.contains(where: { $0.info == item.info }) {
+            tempShownItemContexts.append(TempShownItemContext(
                 info: item.info,
                 returnDestination: destination,
-                shownInterfaceWindow: shownInterfaceWindow
-            )
-            tempShownItemContexts.append(context)
+                shownInterfaceWindow: nil
+            ))
+        }
+        defer {
             runTempShownItemTimer(for: appState.settingsManager.advancedSettingsManager.tempShowInterval)
         }
+        do {
+            try await slowMove(item: item, to: .leftOfItem(targetItem))
+            // Moving can introduce hosted status windows and drag images.
+            // Only windows introduced by the subsequent click are interfaces.
+            let initialWindows = Set(WindowInfo.getOnScreenWindows().map(\.windowID))
+            try await click(item: item, with: mouseButton)
+            let window = await waitForItemInterface(item, excluding: initialWindows)
+            if let index = tempShownItemContexts.firstIndex(where: { $0.info == item.info }) {
+                tempShownItemContexts[index].shownInterfaceWindow = window
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            Logger.itemManager.error("Could not temporarily activate item: \(error)")
+        }
+    }
+
+    private func waitForItemInterface(_ item: MenuBarItem, excluding existingWindows: Set<CGWindowID>) async -> WindowInfo? {
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(500))
+        repeat {
+            guard !Task.isCancelled else { return nil }
+            if let window = WindowInfo.getOnScreenWindows().first(where: {
+                $0.ownerPID == item.ownerPID && !existingWindows.contains($0.windowID) &&
+                $0.layer != CGWindowLevelForKey(.statusWindow) &&
+                $0.layer != CGWindowLevelForKey(.draggingWindow)
+            }) {
+                return window
+            }
+            do { try await Task.sleep(for: .milliseconds(50)) } catch { return nil }
+        } while ContinuousClock.now < deadline
+        return nil
     }
 
     /// Rehides all temporarily shown items.
     ///
     /// If an item is currently showing its interface, this method waits for the
     /// interface to close before hiding the items.
-    func rehideTempShownItems() async {
+    private func rehideTempShownItems() async {
+        guard isSetUp, !Task.isCancelled else { return }
+        guard !isActivatingPanelItem, !isMovingAccessibleItem else {
+            runTempShownItemTimer(for: 3)
+            return
+        }
+        isRestoringTempShownItems = true
+        defer { isRestoringTempShownItems = false }
         itemMoveCount += 1
         defer {
             itemMoveCount -= 1
@@ -1423,7 +2137,7 @@ extension MenuBarItemManager {
 
         var failedContexts = [TempShownItemContext]()
 
-        let items = MenuBarItem.getMenuBarItems(onScreenOnly: false, activeSpaceOnly: true)
+        let items = menuBarItems(onScreenOnly: false, activeSpaceOnly: true)
 
         MouseCursor.hide()
 
@@ -1431,23 +2145,25 @@ extension MenuBarItemManager {
             MouseCursor.show()
         }
 
-        while let context = tempShownItemContexts.popLast() {
+        while !Task.isCancelled, let context = tempShownItemContexts.popLast() {
             guard let item = items.first(where: { $0.info == context.info }) else {
                 continue
             }
             do {
                 try await move(item: item, to: context.returnDestination)
+            } catch is CancellationError {
+                failedContexts.append(context)
+                break
             } catch {
                 Logger.itemManager.error("Failed to rehide \(item.logString) (error: \(error))")
                 failedContexts.append(context)
             }
         }
 
-        if failedContexts.isEmpty {
-            tempShownItemsTimer?.invalidate()
-            tempShownItemsTimer = nil
+        tempShownItemContexts.append(contentsOf: failedContexts)
+        if tempShownItemContexts.isEmpty {
+            tempShownItemDelay.cancel()
         } else {
-            tempShownItemContexts = failedContexts
             Logger.itemManager.warning("Some items failed to rehide")
             runTempShownItemTimer(for: 3)
         }
@@ -1647,7 +2363,8 @@ private extension CGEvent {
 
         let targetPID = Int64(pid)
         let userData = Int64(truncatingIfNeeded: Int(bitPattern: ObjectIdentifier(event)))
-        let windowID = Int64(item.windowID)
+        guard let itemWindowID = item.windowID else { return nil }
+        let windowID = Int64(itemWindowID)
 
         event.setIntegerValueField(.eventTargetUnixProcessID, value: targetPID)
         event.setIntegerValueField(.eventSourceUserData, value: userData)

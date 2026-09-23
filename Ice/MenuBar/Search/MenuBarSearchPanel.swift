@@ -19,6 +19,7 @@ final class MenuBarSearchPanel: NSPanel {
 
     /// Storage for internal observers.
     private var cancellables = Set<AnyCancellable>()
+    private let presentation = PanelPresentation()
 
     /// Monitor for mouse down events.
     private lazy var mouseDownMonitor = UniversalEventMonitor(
@@ -27,7 +28,8 @@ final class MenuBarSearchPanel: NSPanel {
         guard
             let self,
             let appState,
-            event.window !== self
+            event.window !== self,
+            event.cgEvent.map({ !MenuBarItemClick.isGeneratedEvent($0) }) ?? true
         else {
             return event
         }
@@ -93,17 +95,46 @@ final class MenuBarSearchPanel: NSPanel {
     }
 
     /// Shows the search panel on the given screen.
-    func show(on screen: NSScreen) async {
+    func show(on screen: NSScreen) {
         guard let appState else {
             return
         }
+        close()
 
         // Important that we set the navigation state before updating the cache.
         appState.navigationState.isSearchPresented = true
 
-        if ScreenCapture.cachedCheckPermissions() {
-            await appState.imageCache.updateCache()
+        // Show searchable names and cached previews first. Fresh captures can
+        // reveal hidden items and wait for geometry without delaying typing.
+        mouseDownMonitor.start()
+        keyDownMonitor.start()
+        Logger.menuBarSearchPanel.debug("Requested search panel presentation")
+        presentation.show { [weak self] in
+            self?.prepare(on: screen)
+        } present: { [weak self] in
+            guard let self else { return }
+            makeKeyAndOrderFront(nil)
+            // Build the native key-view loop before selecting the search field.
+            // SwiftUI focus requests alone left this nonactivating panel as
+            // first responder on macOS 26.5. See docs/audits/2026-09-21-search-focus.txt.
+            contentView?.layoutSubtreeIfNeeded()
+            recalculateKeyViewLoop()
+            if firstResponder === self {
+                selectNextKeyView(nil)
+            }
+            Logger.menuBarSearchPanel.debug("Presented search panel")
+        } refresh: { [weak self] in
+            guard let appState = self?.appState else { return }
+            await appState.itemManager.refreshImagesForPresentation()
+            Logger.menuBarSearchPanel.debug("Finished search image refresh")
         }
+    }
+
+    private func prepare(on screen: NSScreen) {
+        guard let appState else { return }
+
+        // Revoked capture access must clear previews before the first frame.
+        appState.imageCache.refreshPermissionState()
 
         let hostingView = MenuBarSearchHostingView(appState: appState, panel: self)
         hostingView.setFrameSize(hostingView.intrinsicContentSize)
@@ -118,29 +149,37 @@ final class MenuBarSearchPanel: NSPanel {
         )
 
         cascadeTopLeft(from: topLeft)
-        makeKeyAndOrderFront(nil)
-
-        mouseDownMonitor.start()
-        keyDownMonitor.start()
     }
 
     /// Toggles the panel's visibility.
-    func toggle() async {
-        if isVisible {
+    func toggle() {
+        if presentation.isRequested || isVisible {
             close()
         } else if let screen = MenuBarSearchPanel.defaultScreen {
-            await show(on: screen)
+            show(on: screen)
         }
     }
 
     /// Dismisses the search panel.
     override func close() {
+        if presentation.isRequested {
+            if isVisible {
+                Logger.menuBarSearchPanel.debug("Closed search panel")
+            } else {
+                Logger.menuBarSearchPanel.debug("Dismissed pending search presentation")
+            }
+        }
+        presentation.dismiss()
         super.close()
         contentView = nil
         mouseDownMonitor.stop()
         keyDownMonitor.stop()
         appState?.navigationState.isSearchPresented = false
     }
+}
+
+private extension Logger {
+    static let menuBarSearchPanel = Logger(category: "MenuBarSearchPanel")
 }
 
 private final class MenuBarSearchHostingView: NSHostingView<AnyView> {
@@ -183,7 +222,6 @@ private struct MenuBarSearchContentView: View {
     @State private var searchText = ""
     @State private var displayedItems = [SectionedListItem<ItemID>]()
     @State private var selection: ItemID?
-    @FocusState private var searchFieldIsFocused: Bool
 
     private let fuse = Fuse(threshold: 0.5)
 
@@ -199,7 +237,6 @@ private struct MenuBarSearchContentView: View {
             .multilineTextAlignment(.leading)
             .font(.system(size: 18))
             .padding(15)
-            .focused($searchFieldIsFocused)
 
             Divider()
 
@@ -237,9 +274,6 @@ private struct MenuBarSearchContentView: View {
         }
         .frame(width: 600, height: 400)
         .fixedSize()
-        .task {
-            searchFieldIsFocused = true
-        }
         .onChange(of: searchText, initial: true) {
             updateDisplayedItems()
             selectFirstDisplayedItem()
@@ -269,8 +303,11 @@ private struct MenuBarSearchContentView: View {
             items.append((headerItem, section.displayString))
 
             for item in itemManager.itemCache.managedItems(for: section).reversed() {
-                let listItem = ListItem.item(id: .item(item.info)) {
-                    performAction(for: item)
+                // Stored actions must not capture this view: its state owns
+                // displayedItems, which owns these actions.
+                let listItem = ListItem.item(id: .item(item.info)) { [itemManager, closePanel] in
+                    closePanel()
+                    itemManager.showItemAfterClosingPanel(item, mouseButton: .left)
                 } content: {
                     MenuBarSearchItemView(item: item)
                 }
@@ -303,10 +340,7 @@ private struct MenuBarSearchContentView: View {
 
     private func performAction(for item: MenuBarItem) {
         closePanel()
-        Task {
-            try await Task.sleep(for: .milliseconds(25))
-            itemManager.tempShowItem(item, clickWhenFinished: true, mouseButton: .left)
-        }
+        itemManager.showItemAfterClosingPanel(item, mouseButton: .left)
     }
 }
 
@@ -409,16 +443,12 @@ private struct MenuBarSearchItemView: View {
 
     private var image: NSImage? {
         guard
-            let image = imageCache.images[item.info]?.trimmingTransparentPixels(around: [.minXEdge, .maxXEdge]),
-            let screen = imageCache.screen
+            let capture = imageCache.images[item.info],
+            let image = capture.cgImage.trimmingTransparentPixels(around: [.minXEdge, .maxXEdge])
         else {
             return nil
         }
-        let size = CGSize(
-            width: CGFloat(image.width) / screen.backingScaleFactor,
-            height: CGFloat(image.height) / screen.backingScaleFactor
-        )
-        return NSImage(cgImage: image, size: size)
+        return MenuBarItemImage(cgImage: image, scale: capture.scale).nsImage
     }
 
     private var appIcon: NSImage? {
@@ -449,9 +479,7 @@ private struct MenuBarSearchItemView: View {
         if let image {
             ZStack {
                 RoundedRectangle(cornerRadius: 5, style: .circular)
-                    .fill(.regularMaterial)
-                    .brightness(0.25)
-                    .opacity(0.75)
+                    .fill(imageCache.previewBackgrounds[item.info] == .dark ? Color.black : Color.white)
                     .frame(width: item.frame.width)
                     .overlay {
                         RoundedRectangle(cornerRadius: 5, style: .circular)

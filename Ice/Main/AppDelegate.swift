@@ -69,6 +69,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        appState?.menuBarManager.iceBarPanel.close()
+        appState?.menuBarManager.searchPanel.close()
+        appState?.menuBarManager.performTeardown()
+        appState?.eventManager.performTeardown()
+        appState?.itemManager.performTeardown()
+        appState?.imageCache.performTeardown()
+    }
+
     // MARK: Other Methods
 
     /// Assigns the app state to the delegate.

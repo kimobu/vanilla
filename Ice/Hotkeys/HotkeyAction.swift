@@ -17,7 +17,7 @@ enum HotkeyAction: String, Codable, CaseIterable {
     case toggleApplicationMenus = "ToggleApplicationMenus"
 
     @MainActor
-    func perform(appState: AppState) async {
+    func perform(appState: AppState) {
         switch self {
         case .toggleHiddenSection:
             guard let section = appState.menuBarManager.section(withName: .hidden) else {
@@ -38,7 +38,7 @@ enum HotkeyAction: String, Codable, CaseIterable {
                 appState.preventShowOnHover()
             }
         case .searchMenuBarItems:
-            await appState.menuBarManager.searchPanel.toggle()
+            appState.menuBarManager.searchPanel.toggle()
         case .enableIceBar:
             appState.settingsManager.generalSettingsManager.useIceBar.toggle()
         case .showSectionDividers:
